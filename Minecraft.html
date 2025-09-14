@@ -1,0 +1,772 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Minecraft-like 3D — Envanter + TNT + Lav + Obsidiyen + Portal</title>
+<style>
+html,body { height:100%; margin:0; background:#111; overflow:hidden; font-family:Segoe UI, Roboto, Arial }
+#info { position:fixed; left:12px; top:12px; z-index:50; color:#ddd; background:rgba(0,0,0,0.45); padding:10px; border-radius:8px; }
+#toolbar { position:fixed; left:12px; bottom:12px; z-index:50; display:flex; gap:8px; }
+.slot { width:44px; height:44px; border-radius:6px; border:2px solid rgba(255,255,255,0.06); background-size:cover; background-position:center; box-shadow:0 6px 20px rgba(0,0,0,0.6); cursor:pointer }
+.slot.selected { outline:3px solid rgba(255,255,255,0.85) }
+#crosshair { position:fixed; left:50%; top:50%; width:18px; height:18px; margin-left:-9px; margin-top:-9px; z-index:49; pointer-events:none }
+#crosshair:after { content:''; display:block; width:4px; height:4px; border-radius:50%; margin:7px auto; background:#fff }
+#blockHint { position:fixed; right:12px; top:12px; z-index:50; background:rgba(0,0,0,0.45); color:#eee; padding:8px; border-radius:8px }
+#overlay-underwater { position:fixed; inset:0; z-index:40; pointer-events:none; background:rgba(0,30,70,0.0) }
+#inventory {
+  position:fixed; inset:0; display:none; place-items:center; z-index:60;
+  background:rgba(0,0,0,0.55); backdrop-filter: blur(2px);
+}
+#invPanel{
+  background:rgba(12,12,12,0.9); border:1px solid rgba(255,255,255,0.08);
+  padding:14px; border-radius:10px; color:#eee; width:min(720px,92vw);
+  box-shadow:0 12px 40px rgba(0,0,0,0.6)
+}
+#invGrid{ display:grid; grid-template-columns:repeat(auto-fill, minmax(64px,1fr)); gap:10px; margin-top:10px }
+.invSlot{
+  height:64px; border-radius:8px; border:2px solid rgba(255,255,255,0.08);
+  background-size:cover; background-position:center; cursor:pointer;
+}
+.invSlot:hover{ border-color:#fff }
+canvas { display:block }
+.small { opacity:0.8; font-size:12px; color:#bbb }
+</style>
+</head>
+<body>
+<div id="info">
+  <strong>3D Voxel (Three.js)</strong><br>
+  Tıklayın, fareyi kilitleyin ve oynayın.<br>
+  W/S: ileri/geri — A/D: sağ/sol — (Zıplama yok)<br>
+  Sol fare: kır — Sağ fare: koy — <b>E</b>: Envanter
+</div>
+<div id="blockHint">Seçili blok: <span id="blockName">Dirt</span></div>
+<div id="toolbar"></div>
+<div id="crosshair"></div>
+<div id="overlay-underwater"></div>
+
+<!-- Envanter -->
+<div id="inventory">
+  <div id="invPanel">
+    <div><b>Envanter</b> <span class="small">— Bir bloka tıkla (E ile kapat)</span></div>
+    <div id="invGrid"></div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.154.0/build/three.min.js"></script>
+<script>
+const BLOCK_SIZE=0.4, GRID_W=96, GRID_H=96, GRID_D=48;
+const EYE_HEIGHT = 2;
+const MAX_STEP = 1;
+
+// Dokular (AYNEN senin verdiklerin)
+const TEX = {
+  dirt:'https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcRvJmdfF1rbNy8hPiV7Y4Zk8LQq2DVII6vvbA&s',
+  gravel:'https://p.novaskin.me/3227683066.png?class=thumbnail',
+  stone:'https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcSd76k-uLoF78Xp4IjyM7tmc4RQUrBGJWZSPw&s',
+  wood:'https://p.novaskin.me/3835313885.png?class=thumbnail',
+  sand:'https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcRRIFznsJS37WaQCbXa4UJ8L51DLAnJQ1hvEA&s',
+  plank:'https://p.novaskin.me/5736853225.png',
+  water:'https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcRsFRp0JoDCeuAuE4Kpzv5Q08tkk34U-ofd1w&s',
+  grass_side:'https://p.novaskin.me/4840324147.png?class=thumbnail',
+  grass_top:'https://p.novaskin.me/5640963127.png?class=thumbnail',
+  pig:'https://media.tenor.com/xmQHvbjDqIQAAAAj/minecraft.gif',
+  villager:'https://r2.mcpedl.com/submissions/97539/images/new-villager-animations_2.gif',
+  glass:'https://p.novaskin.me/6507933547.png?class=thumbnail',
+  glowstone:'https://p.novaskin.me/eagmwq6drc.png?class=thumbnail',
+  // Yeni bloklar
+  tnt_top:'https://art.pixilart.com/fcb74b87e766d79.png',
+  tnt_bottom:'https://art.pixilart.com/b5785ba1c988426.png',
+  tnt_side:'https://p.novaskin.me/5096833490.png?class=thumbnail',
+  lava:'https://mcdf.wiki.gg/images/d/dd/Lava_Texture_Item.jpg?269d27',
+  obsidian:'https://p.novaskin.me/26p0u0bn7s8.png?class=thumbnail'
+};
+
+const BLOCK = {
+  AIR:0, DIRT:1, GRAVEL:2, STONE:3, WOOD:4, SAND:5, PLANK:6, WATER:7, GRASS:8,
+  PIG:9, VILLAGER:10, GLASS:11, GLOWSTONE:12,
+  TNT:13, LAVA:14, OBSIDIAN:15, PORTAL:16
+};
+const NAMES = {
+  1:'Dirt',2:'Gravel',3:'Stone',4:'Wood',5:'Sand',6:'Plank',7:'Water',8:'Grass',
+  11:'Glass',12:'Glowstone',13:'TNT',14:'Lava',15:'Obsidian',16:'Portal'
+};
+
+// Scene & camera
+const scene = new THREE.Scene(); scene.background = new THREE.Color(0x87ceeb);
+const camera = new THREE.PerspectiveCamera(75,innerWidth/innerHeight,0.05,300);
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(innerWidth,innerHeight); renderer.setPixelRatio(Math.min(2,window.devicePixelRatio));
+document.body.appendChild(renderer.domElement);
+window.addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
+
+// Işıklar
+scene.add(new THREE.HemisphereLight(0xffffff,0x444444,0.85));
+const dir = new THREE.DirectionalLight(0xffffff,0.5); dir.position.set(5,10,7); scene.add(dir);
+
+// Grid
+let grid = Array.from({length:GRID_D},()=>Array.from({length:GRID_H},()=>Array(GRID_W).fill(BLOCK.AIR)));
+
+// Terrain
+for(let x=0;x<GRID_W;x++) for(let y=0;y<GRID_H;y++){
+  const base = 2 + Math.floor( Math.abs(Math.sin(x*0.12)+Math.cos(y*0.11))*3 );
+  const extraStone = Math.floor( (Math.sin(x*0.05)*Math.cos(y*0.05)+1)*2 );
+  const h = base + extraStone;
+  for(let z=0; z<h; z++){
+    let t=BLOCK.DIRT; const v=Math.sin((x+y)*0.06)+Math.random()*0.5;
+    if(z < Math.max(0,h-3)) t=BLOCK.STONE;
+    else {
+      if(v>0.7) t=BLOCK.STONE;
+      else if(v>0.25) t=BLOCK.GRASS;
+      else if(v<-0.6) t=BLOCK.SAND;
+      else if(Math.random()<0.01) t=BLOCK.WATER;
+      else t=BLOCK.DIRT;
+    }
+    grid[z][y][x]=t;
+  }
+}
+
+// Materials
+const loader = new THREE.TextureLoader();
+function basicMat(url,opt={transparent:false,opacity:1, emissive:0x000000}){
+  const t=loader.load(url);
+  t.magFilter=THREE.NearestFilter; t.minFilter=THREE.LinearMipMapLinearFilter;
+  return new THREE.MeshStandardMaterial({map:t,transparent:opt.transparent,opacity:opt.opacity,emissive:new THREE.Color(opt.emissive)});
+}
+const mats={};
+mats[BLOCK.DIRT]=basicMat(TEX.dirt);
+mats[BLOCK.GRAVEL]=basicMat(TEX.gravel);
+mats[BLOCK.STONE]=basicMat(TEX.stone);
+mats[BLOCK.WOOD]=basicMat(TEX.wood);
+mats[BLOCK.SAND]=basicMat(TEX.sand);
+mats[BLOCK.PLANK]=basicMat(TEX.plank);
+mats[BLOCK.WATER]=basicMat(TEX.water);
+mats[BLOCK.GLASS]=basicMat(TEX.glass);
+mats[BLOCK.GLOWSTONE]=basicMat(TEX.glowstone,{emissive:0x775533});
+mats[BLOCK.LAVA]=basicMat(TEX.lava,{emissive:0x993300});
+mats[BLOCK.OBSIDIAN]=basicMat(TEX.obsidian,{emissive:0x111122});
+
+// TNT: 6 yüz (right,left,top,bottom,front,back)
+function tntMaterialsArray(){
+  const side = basicMat(TEX.tnt_side);
+  const top  = basicMat(TEX.tnt_top);
+  const bot  = basicMat(TEX.tnt_bottom);
+  return [side,side,top,bot,side,side];
+}
+
+// Grass materyal dizisi
+function grassMaterialsArray(){
+  const matGrassSide=basicMat(TEX.grass_side);
+  const matGrassTop=basicMat(TEX.grass_top);
+  const matDirt=mats[BLOCK.DIRT];
+  return [matGrassSide,matGrassSide,matGrassTop,matDirt,matGrassSide,matGrassSide];
+}
+
+// Portal materyali
+const portalMat = new THREE.MeshBasicMaterial({color:0x8833ff, opacity:0.55, transparent:true, side:THREE.DoubleSide});
+
+// Geometry & gruplar
+const cubeGeo = new THREE.BoxGeometry(BLOCK_SIZE,BLOCK_SIZE,BLOCK_SIZE);
+const blocksGroup = new THREE.Group(); scene.add(blocksGroup);
+function posFor(x,y,z){ return new THREE.Vector3((x+0.5-GRID_W/2)*BLOCK_SIZE,(z+0.5)*BLOCK_SIZE,(y+0.5-GRID_H/2)*BLOCK_SIZE); }
+
+// Yardımcı
+function keyOf(x,y,z){ return `${x},${y},${z}`; }
+
+// Glowstone ışıkları
+const glowLights = new Map();
+function addGlowLight(x,y,z){
+  const light = new THREE.PointLight(0xffddaa,1.15,6);
+  light.position.copy(posFor(x,y,z));
+  scene.add(light);
+  glowLights.set(keyOf(x,y,z),light);
+}
+function removeGlowLight(x,y,z){
+  const k=keyOf(x,y,z);
+  const l=glowLights.get(k);
+  if(l){ scene.remove(l); glowLights.delete(k); }
+}
+
+// Mesh map
+const meshesMap=new Map();
+function createMeshForBlock(x,y,z,t){
+  let mesh;
+  if(t===BLOCK.GRASS) mesh=new THREE.Mesh(cubeGeo,grassMaterialsArray());
+  else if(t===BLOCK.WATER){ const m=mats[BLOCK.WATER].clone(); m.opacity=0.6; mesh=new THREE.Mesh(cubeGeo,m); }
+  else if(t===BLOCK.TNT){ mesh=new THREE.Mesh(cubeGeo,tntMaterialsArray()); }
+  else if(t===BLOCK.PORTAL){ mesh=new THREE.Mesh(cubeGeo,portalMat); }
+  else if(t===BLOCK.LAVA){ const m=mats[BLOCK.LAVA].clone(); m.opacity=0.92; mesh=new THREE.Mesh(cubeGeo,m); }
+  else mesh=new THREE.Mesh(cubeGeo,mats[t]||mats[BLOCK.DIRT]);
+  mesh.position.copy(posFor(x,y,z));
+  mesh.userData={x,y,z,t};
+  return mesh;
+}
+function addBlockMesh(x,y,z,t){
+  const mesh=createMeshForBlock(x,y,z,t);
+  blocksGroup.add(mesh); meshesMap.set(keyOf(x,y,z),mesh);
+  if(t===BLOCK.GLOWSTONE) addGlowLight(x,y,z);
+}
+function removeBlockMesh(x,y,z){
+  const k=keyOf(x,y,z); const m=meshesMap.get(k);
+  if(m){
+    if(m.userData.t===BLOCK.GLOWSTONE) removeGlowLight(x,y,z);
+    blocksGroup.remove(m); m.geometry.dispose?.(); meshesMap.delete(k);
+  }
+}
+function setBlock(x,y,z,t){
+  if(z<0||z>=GRID_D||y<0||y>=GRID_H||x<0||x>=GRID_W) return;
+  const prev=grid[z][y][x];
+  if(prev===t) return;
+  if(prev!==BLOCK.AIR) removeBlockMesh(x,y,z);
+  grid[z][y][x]=t;
+  if(t!==BLOCK.AIR) addBlockMesh(x,y,z,t);
+
+  // Obsidiyen konduğunda portal dene
+  if(t===BLOCK.OBSIDIAN) tryFormPortalAt(x,y,z);
+}
+function rebuildMeshes(){
+  // temizle
+  while(blocksGroup.children.length) blocksGroup.remove(blocksGroup.children[0]);
+  meshesMap.clear();
+  glowLights.forEach(l=>scene.remove(l)); glowLights.clear();
+  // tekrar ekle
+  for(let z=0; z<GRID_D; z++) for(let y=0;y<GRID_H;y++) for(let x=0;x<GRID_W;x++){
+    const t=grid[z][y][x]; if(t===BLOCK.AIR) continue; addBlockMesh(x,y,z,t);
+  }
+}
+
+// Ağaç üretimi (wood+glass+glowstone)
+function topSolidZ(ix,iy){
+  if(ix<0||iy<0||ix>=GRID_W||iy>=GRID_H) return -1;
+  for(let z=GRID_D-1; z>=0; z--) if(grid[z][iy][ix]!==BLOCK.AIR && grid[z][iy][ix]!==BLOCK.WATER && grid[z][iy][ix]!==BLOCK.LAVA && grid[z][iy][ix]!==BLOCK.PORTAL) return z;
+  return -1;
+}
+function isSolidAt(ix,iy,iz){
+  if(iz<0||iz>=GRID_D||iy<0||iy>=GRID_H||ix<0||ix>=GRID_W) return false;
+  const b=grid[iz][iy][ix];
+  return b!==BLOCK.AIR && b!==BLOCK.WATER && b!==BLOCK.LAVA && b!==BLOCK.PORTAL;
+}
+// Dünya tipleri
+let world = "overworld"; // veya "nether"
+
+// Nether dünyasını basitçe oluştur
+function buildNether(){
+  for(let z=0; z<GRID_D; z++) for(let y=0;y<GRID_H;y++) for(let x=0;x<GRID_W;x++){
+    grid[z][y][x] = (z===0) ? BLOCK.OBSIDIAN :
+                    (z<3) ? BLOCK.NETHERRACK||BLOCK.STONE : 
+                    (Math.random()<0.1?BLOCK.LAVA:BLOCK.AIR);
+  }
+  rebuildMeshes();
+}
+
+// Portala girme kontrolü
+function checkPortal(){
+  const ix=Math.floor((camera.position.x/BLOCK_SIZE)+GRID_W/2);
+  const iy=Math.floor((camera.position.z/BLOCK_SIZE)+GRID_H/2);
+  const iz=Math.floor((camera.position.y/BLOCK_SIZE));
+  const b=(grid[iz]?.[iy]?.[ix])|0;
+  if(b===BLOCK.PORTAL){
+    if(world==="overworld"){
+      world="nether"; buildNether();
+      player.x=GRID_W/2; player.y=GRID_H/2; player.z=5+EYE_HEIGHT;
+    } else {
+      world="overworld"; // Tekrar normal dünyayı kur
+      location.reload(); // basit çözüm: sayfayı yenile
+    }
+  }
+}
+function tryPlace(x,y,z,t){ if(z>=0&&z<GRID_D&&y>=0&&y<GRID_H&&x>=0&&x<GRID_W && grid[z][y][x]===BLOCK.AIR){ grid[z][y][x]=t; } }
+(function scatterTrees(){
+  const count = 24;
+  let placed=0, tries=0;
+  while(placed<count && tries<800){
+    tries++;
+    const x = Math.floor(Math.random()*GRID_W);
+    const y = Math.floor(Math.random()*GRID_H);
+    const ground = topSolidZ(x,y);
+    if(ground<0) continue;
+    const groundBlock = grid[ground][y][x];
+    if(!(groundBlock===BLOCK.GRASS || groundBlock===BLOCK.DIRT || groundBlock===BLOCK.SAND)) continue;
+    const h = 3 + Math.floor(Math.random()*3);
+    let ok=true;
+    for(let i=1;i<=h;i++){ if(isSolidAt(x,y,ground+i)) { ok=false; break; } }
+    if(!ok) continue;
+    for(let i=1;i<=h;i++){ grid[ground+i][y][x]=BLOCK.WOOD; }
+    const topZ = ground+h;
+    const r = 2;
+    for(let dz=-r; dz<=r; dz++)
+      for(let dy=-r; dy<=r; dy++)
+        for(let dx=-r; dx<=r; dx++){
+          const dist = Math.abs(dx)+Math.abs(dy)+Math.abs(dz);
+          const tx=x+dx, ty=y+dy, tz=topZ+dz;
+          if(dist<=r+1){
+            if(dx===0 && dy===0 && dz===0){
+              tryPlace(tx,ty,tz,BLOCK.GLOWSTONE);
+            } else if(dist>=1){
+              tryPlace(tx,ty,tz,BLOCK.GLASS);
+            }
+          }
+        }
+    placed++;
+  }
+})();
+
+rebuildMeshes();
+
+// Player
+const player={x:GRID_W/2,y:GRID_H/2,z:5, yaw:0,pitch:0, speed:0.0};
+(function snapToGroundAtStart(){
+  const ix=Math.floor(player.x), iy=Math.floor(player.y);
+  const zTop = topSolidZ(ix,iy);
+  player.z = (zTop<0?0:zTop) + EYE_HEIGHT;
+})();
+
+// Pointer lock + mouse
+renderer.domElement.addEventListener('click',()=>{ renderer.domElement.requestPointerLock(); });
+document.addEventListener('pointerlockchange',()=>{ if(document.pointerLockElement===renderer.domElement){ document.addEventListener('mousemove',onMouseMove); } else { document.removeEventListener('mousemove',onMouseMove); } });
+function onMouseMove(e){
+  player.yaw-=e.movementX*0.0025;
+  player.pitch-=e.movementY*0.0025;
+  player.pitch=Math.max(-Math.PI/2,Math.min(Math.PI/2,player.pitch));
+  camera.rotation.set(player.pitch,player.yaw,0);
+}
+
+// Keys
+const keys={};
+window.addEventListener('keydown', e=>{
+  const k=e.key.toLowerCase(); keys[k]=true;
+  // Envanter toggle
+  if(k==='e'){ toggleInventory(); e.preventDefault(); }
+});
+window.addEventListener('keyup', e=>{ keys[e.key.toLowerCase()]=false; });
+
+// Raycast
+const raycaster=new THREE.Raycaster(); raycaster.far=6;
+function getCenterRay(){ const dir=new THREE.Vector3(0,0,-1).applyEuler(camera.rotation); raycaster.set(camera.position,dir); const intr=raycaster.intersectObjects(blocksGroup.children,false); return intr.length?intr[0]:null; }
+
+// Break/place
+window.addEventListener('mousedown',e=>{
+  if(document.pointerLockElement!==renderer.domElement) return;
+  if(e.button===0){ const it=getCenterRay(); if(it){ const u=it.object.userData; setBlock(u.x,u.y,u.z,BLOCK.AIR); } }
+  if(e.button===2){
+    const it=getCenterRay(); if(it){
+      const u=it.object.userData; const n=it.face.normal;
+      const tx=u.x+Math.round(n.x), ty=u.y+Math.round(n.z), tz=u.z+Math.round(n.y);
+      if(tx>=0&&ty>=0&&tz>=0&&tx<GRID_W&&ty<GRID_H&&tz<GRID_D){
+        if(grid[tz][ty][tx]===BLOCK.AIR){ setBlock(tx,ty,tz,selectedBlock); }
+      }
+    }
+  }
+});
+window.addEventListener('contextmenu',e=>{ if(document.pointerLockElement===renderer.domElement) e.preventDefault(); });
+
+// Toolbar
+const toolbar=[BLOCK.DIRT,BLOCK.GRASS,BLOCK.SAND,BLOCK.WOOD,BLOCK.PLANK,BLOCK.STONE,BLOCK.WATER,BLOCK.GRAVEL,BLOCK.GLASS,BLOCK.GLOWSTONE,BLOCK.TNT,BLOCK.LAVA,BLOCK.OBSIDIAN];
+let selectedIndex=0, selectedBlock=toolbar[selectedIndex];
+const toolbarEl=document.getElementById('toolbar'), blockNameEl=document.getElementById('blockName');
+function iconFor(b){
+  switch(b){
+    case BLOCK.DIRT:return TEX.dirt;
+    case BLOCK.GRASS:return TEX.grass_side;
+    case BLOCK.SAND:return TEX.sand;
+    case BLOCK.WOOD:return TEX.wood;
+    case BLOCK.PLANK:return TEX.plank;
+    case BLOCK.STONE:return TEX.stone;
+    case BLOCK.WATER:return TEX.water;
+    case BLOCK.GRAVEL:return TEX.gravel;
+    case BLOCK.GLASS:return TEX.glass;
+    case BLOCK.GLOWSTONE:return TEX.glowstone;
+    case BLOCK.TNT:return TEX.tnt_side;
+    case BLOCK.LAVA:return TEX.lava;
+    case BLOCK.OBSIDIAN:return TEX.obsidian;
+    default:return TEX.dirt;
+  }
+}
+function buildToolbar(){
+  toolbarEl.innerHTML='';
+  toolbar.forEach((b,i)=>{
+    const div=document.createElement('div');
+    div.className='slot'+(i===selectedIndex?' selected':'');
+    div.style.backgroundImage=`url(${iconFor(b)})`;
+    div.title=NAMES[b]||'Block';
+    div.addEventListener('click',()=>{ selectedIndex=i; selectedBlock=toolbar[selectedIndex]; updateToolbar(); });
+    toolbarEl.appendChild(div);
+  });
+  updateToolbar();
+}
+function updateToolbar(){
+  for(let i=0;i<toolbarEl.children.length;i++){
+    toolbarEl.children[i].classList.toggle('selected',i===selectedIndex);
+  }
+  blockNameEl.innerText=NAMES[selectedBlock]||'Unknown';
+}
+buildToolbar();
+
+// Envanter UI (E ile aç/kapat)
+const invEl=document.getElementById('inventory');
+const invGrid=document.getElementById('invGrid');
+function toggleInventory(){
+  const show = invEl.style.display!=='grid';
+  invEl.style.display = show?'grid':'none';
+  if(show){ buildInventory(); document.exitPointerLock?.(); }
+  else { renderer.domElement.requestPointerLock?.(); }
+}
+function buildInventory(){
+  invGrid.innerHTML='';
+  toolbar.forEach(b=>{
+    const s=document.createElement('div');
+    s.className='invSlot';
+    s.style.backgroundImage=`url(${iconFor(b)})`;
+    s.title=NAMES[b];
+    s.addEventListener('click',()=>{
+      selectedIndex = toolbar.indexOf(b); selectedBlock=b; updateToolbar(); toggleInventory();
+    });
+    invGrid.appendChild(s);
+  });
+}
+
+// Sıvı yayılması (SU)
+function stepWater(){
+  const toAdd=[]; const maxAdds=15;
+  outer: for(let z=0; z<GRID_D; z++) for(let y=0;y<GRID_H;y++) for(let x=0;x<GRID_W;x++){
+    if(grid[z][y][x]!==BLOCK.WATER) continue;
+    if(z-1>=0 && grid[z-1][y][x]===BLOCK.AIR){ toAdd.push([z-1,y,x]); if(toAdd.length>=maxAdds) break outer; continue; }
+    const neigh=[[0,1,0],[0,-1,0],[1,0,0],[-1,0,0]];
+    for(const d of neigh){
+      const nx=x+d[0], ny=y+d[1], nz=z+d[2];
+      if(nx>=0&&ny>=0&&nx<GRID_W&&ny<GRID_H&&grid[nz]?.[ny]?.[nx]===BLOCK.AIR){ toAdd.push([nz,ny,nx]); if(toAdd.length>=maxAdds) break outer; }
+    }
+  }
+  for(const [z,y,x] of toAdd){ if(grid[z][y][x]===BLOCK.AIR){ setBlock(x,y,z,BLOCK.WATER); } }
+}
+
+// LAV yayılması + etkileşimler
+function stepLava(){
+  const toAdd=[]; const maxAdds=8;
+  outer: for(let z=0; z<GRID_D; z++) for(let y=0;y<GRID_H;y++) for(let x=0;x<GRID_W;x++){
+    if(grid[z][y][x]!==BLOCK.LAVA) continue;
+
+    // Su komşuluğu → Obsidiyen
+    const neighAll=[[0,0,-1],[0,0,1],[0,1,0],[0,-1,0],[1,0,0],[-1,0,0]];
+    for(const d of neighAll){
+      const nx=x+d[0], ny=y+d[1], nz=z+d[2];
+      const b = grid[nz]?.[ny]?.[nx];
+      if(b===BLOCK.WATER){ setBlock(x,y,z,BLOCK.OBSIDIAN); continue outer; }
+    }
+
+    // Aşağı akış öncelikli
+    if(z-1>=0 && grid[z-1][y][x]===BLOCK.AIR){ toAdd.push([z-1,y,x]); if(toAdd.length>=maxAdds) break outer; continue; }
+
+    // Yana akış
+    const neigh=[[0,1,0],[0,-1,0],[1,0,0],[-1,0,0]];
+    for(const d of neigh){
+      const nx=x+d[0], ny=y+d[1], nz=z+d[2];
+      if(nx>=0&&ny>=0&&nx<GRID_W&&ny<GRID_H&&grid[nz]?.[ny]?.[nx]===BLOCK.AIR){ toAdd.push([nz,ny,nx]); if(toAdd.length>=maxAdds) break outer; }
+    }
+
+    // Ahşap yakma
+    for(const d of neighAll){
+      const nx=x+d[0], ny=y+d[1], nz=z+d[2];
+      const b = grid[nz]?.[ny]?.[nx];
+      if(b===BLOCK.WOOD || b===BLOCK.PLANK){
+        if(Math.random()<0.25){ setBlock(nx,ny,nz,BLOCK.LAVA); } // tutuşup lava'ya döner
+      }
+    }
+  }
+  // Yayılma
+  for(const [z,y,x] of toAdd){ if(grid[z][y][x]===BLOCK.AIR){ setBlock(x,y,z,BLOCK.LAVA); } }
+}
+
+// Kum/çakıl düşmesi
+function stepFall(){
+  for(let z=GRID_D-2; z>=0; z--) for(let y=0;y<GRID_H;y++) for(let x=0;x<GRID_W;x++){
+    if(grid[z][y][x]===BLOCK.SAND || grid[z][y][x]===BLOCK.GRAVEL){
+      if(grid[z-1]?.[y]?.[x]===BLOCK.AIR){ setBlock(x,y,z-1,grid[z][y][x]); setBlock(x,y,z,BLOCK.AIR); }
+    }
+  }
+}
+
+// Underwater overlay
+const overlay=document.getElementById('overlay-underwater');
+function updateUnderwater(){
+  const ix=Math.floor((camera.position.x/BLOCK_SIZE)+GRID_W/2);
+  const iy=Math.floor((camera.position.z/BLOCK_SIZE)+GRID_H/2);
+  const iz=Math.floor((camera.position.y/BLOCK_SIZE));
+  const b=(grid[iz]?.[iy]?.[ix])|0;
+  if(b===BLOCK.WATER) overlay.style.background='rgba(0,30,70,0.25)';
+  else if(b===BLOCK.LAVA) overlay.style.background='rgba(160,50,0,0.25)';
+  else overlay.style.background='rgba(0,0,0,0)';
+}
+
+// Basit mob sistemi (sprite)
+const mobsGroup = new THREE.Group(); scene.add(mobsGroup);
+const mobGeo = new THREE.PlaneGeometry(BLOCK_SIZE,BLOCK_SIZE);
+const mobs = [];
+function addMob(x,y,z,type){
+  const tex = loader.load(type===BLOCK.PIG?TEX.pig:TEX.villager);
+  tex.magFilter = THREE.NearestFilter; tex.minFilter = THREE.LinearMipMapLinearFilter;
+  const mat = new THREE.MeshBasicMaterial({map:tex,transparent:true});
+  const mesh = new THREE.Mesh(mobGeo,mat);
+  mesh.position.copy(posFor(x,y,z)); mesh.position.y += BLOCK_SIZE/2;
+  mesh.rotation.y = Math.PI; mobsGroup.add(mesh);
+  mobs.push({x,y,z,mesh,type,dir:[Math.random()-.5,Math.random()-.5]});
+}
+addMob(GRID_W/2+5,GRID_H/2+5,2,BLOCK.PIG);
+addMob(GRID_W/2-5,GRID_H/2-3,2,BLOCK.PIG);
+addMob(GRID_W/2+3,GRID_H/2-4,2,BLOCK.PIG);
+addMob(GRID_W/2-4,GRID_H/2+2,2,BLOCK.VILLAGER);
+addMob(GRID_W/2+2,GRID_H/2-2,2,BLOCK.VILLAGER);
+
+function updateMobs(dt){
+  for(const m of mobs){
+    let nx = m.mesh.position.x + m.dir[0]*dt*1.2;
+    let nz = m.mesh.position.z + m.dir[1]*dt*1.2;
+    const ix = Math.floor(nx/BLOCK_SIZE+GRID_W/2);
+    const iy = Math.floor(nz/BLOCK_SIZE+GRID_H/2);
+    let zTop = topSolidZ(ix,iy);
+    if(zTop<0) zTop=0;
+    const targetY = posFor(0,0,zTop).y + BLOCK_SIZE/2;
+    if(isSolidAt(ix,iy,zTop+1) || isSolidAt(ix,iy,zTop+2)){ m.dir[0]*=-1; m.dir[1]*=-1; continue; }
+    m.mesh.position.x = nx; 
+    m.mesh.position.z = nz;
+    m.mesh.position.y += (targetY-m.mesh.position.y)*dt*5;
+    const curZ = Math.floor((m.mesh.position.y - BLOCK_SIZE/2)/BLOCK_SIZE);
+    if(curZ < zTop-6){ m.mesh.material.color.set(0xff0000); } else { m.mesh.material.color.set(0xffffff); }
+  }
+}
+
+// TNT: ateşleme algı + zamanlayıcı + patlama
+const tntTimers=new Map(); // key -> remaining(sec)
+function scheduleTNT(x,y,z,delay=1.2){ tntTimers.set(keyOf(x,y,z),{x,y,z,t:delay}); }
+function checkIgnitionAroundTNT(){
+  for(let z=0; z<GRID_D; z++) for(let y=0;y<GRID_H; y++) for(let x=0; x<GRID_W; x++){
+    if(grid[z][y][x]!==BLOCK.TNT) continue;
+    const k=keyOf(x,y,z); if(tntTimers.has(k)) continue;
+    // Lav komşuluğu patlatır
+    const neigh=[[0,0,-1],[0,0,1],[0,1,0],[0,-1,0],[1,0,0],[-1,0,0]];
+    for(const d of neigh){
+      const nx=x+d[0], ny=y+d[1], nz=z+d[2];
+      const b=grid[nz]?.[ny]?.[nx];
+      if(b===BLOCK.LAVA){ scheduleTNT(x,y,z); break; }
+    }
+  }
+}
+function updateTNT(dt){
+  const del=[];
+  for(const [k,obj] of tntTimers){
+    obj.t-=dt;
+    // küçük yanıp sönme efekti
+    const m=meshesMap.get(keyOf(obj.x,obj.y,obj.z));
+    if(m){ m.visible = (Math.floor(obj.t*10)%2===0); }
+    if(obj.t<=0){ explode(obj.x,obj.y,obj.z,7.5); del.push(k); }
+  }
+  del.forEach(k=>{
+    const o=tntTimers.get(k); if(o){ const m=meshesMap.get(keyOf(o.x,o.y,o.z)); if(m) m.visible=true; }
+    tntTimers.delete(k);
+  });
+}
+function explode(cx,cy,cz,r){
+  // TNT bloğunu sil
+  if(grid[cz]?.[cy]?.[cx]===BLOCK.TNT) setBlock(cx,cy,cz,BLOCK.AIR);
+  const r2=r*r;
+  for(let z=Math.max(0,Math.floor(cz-r)); z<Math.min(GRID_D,Math.ceil(cz+r)); z++)
+    for(let y=Math.max(0,Math.floor(cy-r)); y<Math.min(GRID_H,Math.ceil(cy+r)); y++)
+      for(let x=Math.max(0,Math.floor(cx-r)); x<Math.min(GRID_W,Math.ceil(cx+r)); x++){
+        const dx=x-cx, dy=y-cy, dz=z-cz;
+        if(dx*dx+dy*dy+dz*dz<=r2){
+          const b=grid[z][y][x];
+          if(b!==BLOCK.OBSIDIAN) setBlock(x,y,z,BLOCK.AIR); // obsidyen dayanıklı
+        }
+      }
+}
+
+// Portal: 4x5 dış çerçeve (iç boşluk 2x3)
+function frameAllObsidian(x0,y0,z0,dx,dy){
+  // dx,dy: yön (x veya y ekseni)
+  const W=4, H=5; // dış boy
+  for(let i=0;i<W;i++) for(let j=0;j<H;j++){
+    const ix=x0+i*dx, iy=y0+i*dy, iz=z0+j;
+    const onEdge = (i===0||i===W-1||j===0||j===H-1);
+    if(onEdge){
+      if(grid[iz]?.[iy]?.[ix]!==BLOCK.OBSIDIAN) return false;
+    } else {
+      const b=grid[iz]?.[iy]?.[ix];
+      if(!(b===BLOCK.AIR||b===BLOCK.PORTAL)) return false;
+    }
+  }
+  return true;
+}
+function fillPortal(x0,y0,z0,dx,dy){
+  // iç boşluğu (2x3) PORTAL ile doldur
+  for(let i=1;i<=2;i++) for(let j=1;j<=3;j++){
+    const ix=x0+i*dx, iy=y0+i*dy, iz=z0+j;
+    setBlock(ix,iy,iz,BLOCK.PORTAL);
+  }
+}
+function tryFormPortalAt(x,y,z){
+  // iki yönü dene: X’e paralel (dx=1,dy=0) ve Y’ye paralel (dx=0,dy=1)
+  // yerleştirilen obsidiyenin sol-alt köşede olma ihtimali için 0..3/0..4 kaydırmaları deneriz
+  const cands=[
+    {dx:1,dy:0},{dx:0,dy:1}
+  ];
+  for(const o of cands){
+    for(let sx=-3;sx<=0;sx++){
+      for(let sy=-4;sy<=0;sy++){
+        const x0=x+sx*o.dx, y0=y+sx*o.dy, z0=z+sy;
+        if(frameAllObsidian(x0,y0,z0,o.dx,o.dy)) fillPortal(x0,y0,z0,o.dx,o.dy);
+      }
+    }
+  }
+}
+
+// Portal teması → dünya değişimi
+let inNether=false, portalCooldown=0;
+function checkPortalTouch(dt){
+  portalCooldown=Math.max(0,portalCooldown-dt);
+  if(portalCooldown>0) return;
+  const ix=Math.floor((camera.position.x/BLOCK_SIZE)+GRID_W/2);
+  const iy=Math.floor((camera.position.z/BLOCK_SIZE)+GRID_H/2);
+  const iz=Math.floor((camera.position.y/BLOCK_SIZE));
+  if(grid[iz]?.[iy]?.[ix]===BLOCK.PORTAL){
+    inNether=!inNether; portalCooldown=1.5;
+    if(inNether) generateNether();
+    else generateOverworld();
+    // oyuncuyu ortaya al
+    player.x=GRID_W/2; player.y=GRID_H/2; const t=topSolidZ(Math.floor(player.x),Math.floor(player.y)); player.z=(t<0?0:t)+EYE_HEIGHT;
+    rebuildMeshes();
+  }
+}
+function generateNether(){
+  // basit nether: taş, lav gölleri, obsidiyen adalar, “kırıktaş” yerine gravel
+  grid = Array.from({length:GRID_D},()=>Array.from({length:GRID_H},()=>Array(GRID_W).fill(BLOCK.AIR)));
+  for(let x=0;x<GRID_W;x++) for(let y=0;y<GRID_H;y++){
+    const base= 3 + Math.floor( (Math.sin(x*0.09)*Math.cos(y*0.11)+1)*4 );
+    for(let z=0; z<base; z++){
+      let t = (z<base-2)?BLOCK.STONE: (Math.random()<0.2?BLOCK.GRAVEL:BLOCK.OBSIDIAN);
+      grid[z][y][x]=t;
+    }
+    // lav gölleri
+    if(Math.random()<0.08){
+      const z0 = Math.max(1,base-2);
+      for(let dz=0; dz<2; dz++) for(let dx=-2; dx<=2; dx++) for(let dy=-2; dy<=2; dy++){
+        const xx=x+dx, yy=y+dy, zz=z0+dz;
+        if(xx>=0&&yy>=0&&xx<GRID_W&&yy<GRID_H&&zz<GRID_D){
+          if(Math.abs(dx)+Math.abs(dy)+dz<=3) grid[zz][yy][xx]=BLOCK.LAVA;
+        }
+      }
+    }
+  }
+  scene.background=new THREE.Color(0x3b0b0b);
+}
+function generateOverworld(){
+  grid = Array.from({length:GRID_D},()=>Array.from({length:GRID_H},()=>Array(GRID_W).fill(BLOCK.AIR)));
+  for(let x=0;x<GRID_W;x++) for(let y=0;y<GRID_H;y++){
+    const base = 2 + Math.floor( Math.abs(Math.sin(x*0.12)+Math.cos(y*0.11))*3 );
+    const extraStone = Math.floor( (Math.sin(x*0.05)*Math.cos(y*0.05)+1)*2 );
+    const h = base + extraStone;
+    for(let z=0; z<h; z++){
+      let t=BLOCK.DIRT; const v=Math.sin((x+y)*0.06)+Math.random()*0.5;
+      if(z < Math.max(0,h-3)) t=BLOCK.STONE;
+      else {
+        if(v>0.7) t=BLOCK.STONE;
+        else if(v>0.25) t=BLOCK.GRASS;
+        else if(v<-0.6) t=BLOCK.SAND;
+        else if(Math.random()<0.01) t=BLOCK.WATER;
+        else t=BLOCK.DIRT;
+      }
+      grid[z][y][x]=t;
+    }
+  }
+  // birkaç ağaç
+  (function scatterTreesAgain(){
+    const count = 20; let placed=0, tries=0;
+    while(placed<count && tries<800){
+      tries++;
+      const x = Math.floor(Math.random()*GRID_W);
+      const y = Math.floor(Math.random()*GRID_H);
+      const ground = topSolidZ(x,y);
+      if(ground<0) continue;
+      const groundBlock = grid[ground][y][x];
+      if(!(groundBlock===BLOCK.GRASS || groundBlock===BLOCK.DIRT || groundBlock===BLOCK.SAND)) continue;
+      const h = 3 + Math.floor(Math.random()*3);
+      let ok=true;
+      for(let i=1;i<=h;i++){ if(isSolidAt(x,y,ground+i)) { ok=false; break; } }
+      if(!ok) continue;
+      for(let i=1;i<=h;i++){ grid[ground+i][y][x]=BLOCK.WOOD; }
+      const topZ = ground+h;
+      const r = 2;
+      for(let dz=-r; dz<=r; dz++)
+        for(let dy=-r; dy<=r; dy++)
+          for(let dx=-r; dx<=r; dx++){
+            const dist = Math.abs(dx)+Math.abs(dy)+Math.abs(dz);
+            const tx=x+dx, ty=y+dy, tz=topZ+dz;
+            if(dist<=r+1){
+              if(dx===0 && dy===0 && dz===0){
+                tryPlace(tx,ty,tz,BLOCK.GLOWSTONE);
+              } else if(dist>=1){
+                tryPlace(tx,ty,tz,BLOCK.GLASS);
+              }
+            }
+          }
+      placed++;
+    }
+  })();
+  scene.background=new THREE.Color(0x87ceeb);
+}
+
+// HAREKET (yerçekimsiz + adım)
+const clock=new THREE.Clock();
+function tryMoveTo(nx,ny){
+  const cx = Math.floor(player.x), cy = Math.floor(player.y);
+  const tx = Math.floor(nx), ty = Math.floor(ny);
+  let curTop = topSolidZ(cx,cy); if(curTop<0) curTop=0;
+  let tarTop = topSolidZ(tx,ty); if(tarTop<0) tarTop=0;
+  const headClear1 = !isSolidAt(tx,ty,tarTop+1);
+  const headClear2 = !isSolidAt(tx,ty,tarTop+2);
+  if(!(headClear1 && headClear2)) return false;
+  if(tarTop - curTop > MAX_STEP) return false;
+  player.x = nx; player.y = ny; player.z = tarTop + EYE_HEIGHT;
+  return true;
+}
+
+function animate(){
+  const dt=Math.min(0.05,clock.getDelta());
+  const forward=(keys['w']?1:0)-(keys['s']?1:0);
+  const strafe=(keys['d']?1:0)-(keys['a']?1:0);
+  const spd=3.5;
+  let dx=(Math.cos(player.yaw)*forward-Math.sin(player.yaw)*strafe)*spd*dt;
+  let dy=(Math.sin(player.yaw)*forward+Math.cos(player.yaw)*strafe)*spd*dt;
+
+  if(dx!==0){ const nx = player.x + dx; tryMoveTo(nx, player.y); }
+  if(dy!==0){ const ny = player.y + dy; tryMoveTo(player.x, ny); }
+
+  camera.position.copy(posFor(player.x,player.y,player.z));
+
+  // Simülasyonlar
+  if(Math.random()<0.25) stepWater();
+  if(Math.random()<0.15) stepLava();
+  stepFall();
+  updateUnderwater();
+  updateMobs(dt);
+
+  // TNT & portal kontrolleri
+  checkIgnitionAroundTNT();
+  updateTNT(dt);
+  checkPortalTouch(dt);
+
+  renderer.render(scene,camera);
+  requestAnimationFrame(animate);
+}
+animate();
+
+// Mouse (başlangıç için)
+camera.rotation.set(0,0,0);
+function onMouseMove(e){
+  player.yaw-=e.movementX*0.0025;
+  player.pitch-=e.movementY*0.0025;
+  player.pitch=Math.max(-Math.PI/2,Math.min(Math.PI/2,player.pitch));
+  camera.rotation.set(player.pitch,player.yaw,0);
+}
+</script>
+</body>
+</html>
