@@ -4,6 +4,8 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>Minecraft-like 3D — Envanter + TNT + Lav + Obsidiyen + Portal</title>
+
+ 
 <style>
 html,body { height:100%; margin:0; background:#111; overflow:hidden; font-family:Segoe UI, Roboto, Arial }
 #info { position:fixed; left:12px; top:12px; z-index:50; color:#ddd; background:rgba(0,0,0,0.45); padding:10px; border-radius:8px; }
@@ -31,6 +33,7 @@ html,body { height:100%; margin:0; background:#111; overflow:hidden; font-family
 .invSlot:hover{ border-color:#fff }
 canvas { display:block }
 .small { opacity:0.8; font-size:12px; color:#bbb }
+
 </style>
 </head>
 <body>
@@ -55,9 +58,54 @@ canvas { display:block }
 
 <script src="https://cdn.jsdelivr.net/npm/three@0.154.0/build/three.min.js"></script>
 <script>
-const BLOCK_SIZE=0.4, GRID_W=96, GRID_H=96, GRID_D=48;
-const EYE_HEIGHT = 2;
+// Eskisi gibi büyük olmasın:
+const BLOCK_SIZE=0.4, GRID_W=48, GRID_H=48, GRID_D=48;
+const EYE_HEIGHT = 1.6; // 2 blok boy için uygun göz hizası
 const MAX_STEP = 1;
+
+const PLAYER_RADIUS = 0.48; // simetrik tolerans için bir tık küçük
+
+
+// --- WATER FLOW (ayarlar + veri yapıları) ---
+const WATER_TICK_MS       = 150;     // su akış tik süresi (ms)
+const WATER_MAX_PER_TICK  = 20;      // her tikte en fazla yeni hücre
+const WATER_MAX_RANGE     = 5;       // kaynaktan en fazla kaç adım (Manhattan)
+const WATER_COOLDOWN_MS   = 2000;    // su kırılınca geri dolma bekleme süresi
+
+let   waterTimer = 0;
+
+// Aktif su hücreleri (bu tikte işlenecek)
+const waterActive = new Set();       // key: "x|y|z"
+
+// Her su hücresinin kaynağa olan adım mesafesi (0 = kaynak)
+const waterDist   = new Map();       // key -> distance (integer)
+
+// Kırılan hücrelerde geri dolmayı erteleme
+const waterCooldown = new Map();     // key -> cooldownSON (performance.now())
+
+const wkey = (x,y,z) => `${x}|${y}|${z}`;
+
+// Hücre ızgarasında güvenli mi?
+function inRange(x,y,z){
+  return x>=0 && y>=0 && z>=0 && x<GRID_W && y<GRID_H && z<GRID_D;
+}
+
+// Su akışını başlat/yeniden etkinleştir (mesafeyi tut)
+function activateWater(x,y,z,dist=0){
+  if (!inRange(x,y,z)) return;
+  const k = wkey(x,y,z);
+  const old = waterDist.get(k);
+  // Daha kısa mesafeyle geliyorsa güncelle
+  if (old === undefined || dist < old){
+    waterDist.set(k, dist);
+  }
+  waterActive.add(k);
+}
+
+
+const GRAVITY = -22;   // ↓ yerçekimi (u/s^2)
+const JUMP_V  = 7.0;   // ↑ ~1 bloktan biraz fazla zıplama
+
 
 // Dokular (AYNEN senin verdiklerin)
 const TEX = {
@@ -94,7 +142,8 @@ const NAMES = {
 
 // Scene & camera
 const scene = new THREE.Scene(); scene.background = new THREE.Color(0x87ceeb);
-const camera = new THREE.PerspectiveCamera(75,innerWidth/innerHeight,0.05,300);
+const camera = new THREE.PerspectiveCamera(75,innerWidth/innerHeight,0.01,300);
+camera.rotation.order = 'YXZ'; // yaw→pitch, roll kilitli kalsın
 const renderer = new THREE.WebGLRenderer({antialias:true});
 renderer.setSize(innerWidth,innerHeight); renderer.setPixelRatio(Math.min(2,window.devicePixelRatio));
 document.body.appendChild(renderer.domElement);
@@ -107,24 +156,137 @@ const dir = new THREE.DirectionalLight(0xffffff,0.5); dir.position.set(5,10,7); 
 // Grid
 let grid = Array.from({length:GRID_D},()=>Array.from({length:GRID_H},()=>Array(GRID_W).fill(BLOCK.AIR)));
 
-// Terrain
-for(let x=0;x<GRID_W;x++) for(let y=0;y<GRID_H;y++){
-  const base = 2 + Math.floor( Math.abs(Math.sin(x*0.12)+Math.cos(y*0.11))*3 );
-  const extraStone = Math.floor( (Math.sin(x*0.05)*Math.cos(y*0.05)+1)*2 );
-  const h = base + extraStone;
-  for(let z=0; z<h; z++){
-    let t=BLOCK.DIRT; const v=Math.sin((x+y)*0.06)+Math.random()*0.5;
-    if(z < Math.max(0,h-3)) t=BLOCK.STONE;
-    else {
-      if(v>0.7) t=BLOCK.STONE;
-      else if(v>0.25) t=BLOCK.GRASS;
-      else if(v<-0.6) t=BLOCK.SAND;
-      else if(Math.random()<0.01) t=BLOCK.WATER;
-      else t=BLOCK.DIRT;
+// --------- DÜZ DÜNYA KURULUMU (hafif) ---------
+function buildFlatWorld() {
+  // her şeyi AIR yap
+  for (let z=0; z<GRID_D; z++)
+    for (let y=0; y<GRID_H; y++)
+      for (let x=0; x<GRID_W; x++)
+        grid[z][y][x] = BLOCK.AIR;
+
+  // Zemin: z=0..1 DIRT, z=2 GRASS (taşma olmasın diye clamp)
+  const z0 = 0;
+  const z1 = Math.min(1, GRID_D-1);
+  const z2 = Math.min(2, GRID_D-1);
+  for (let y=0; y<GRID_H; y++) {
+    for (let x=0; x<GRID_W; x++) {
+      if (z0 >= 0) grid[z0][y][x] = BLOCK.DIRT;
+      if (z1 >= 0) grid[z1][y][x] = BLOCK.DIRT;
+      if (z2 >= 0) grid[z2][y][x] = BLOCK.GRASS;
     }
-    grid[z][y][x]=t;
+  }
+
+  // 1 adet göl (yüzey z=z2'de)
+  const lakeZ = z2;
+  if (lakeZ >= 0) {
+    const lake = {
+      x0: Math.floor(GRID_W*0.55),
+      x1: Math.floor(GRID_W*0.85),
+      y0: Math.floor(GRID_H*0.55),
+      y1: Math.floor(GRID_H*0.85)
+    };
+    for (let y=lake.y0; y<lake.y1; y++) {
+      for (let x=lake.x0; x<lake.x1; x++) {
+        grid[lakeZ][y][x] = BLOCK.WATER;         // yüzey
+        activateWater(x,y,lakeZ, 0);             // göl suyu = kaynak (mesafe 0)
+        if (lakeZ-1 >= 0) grid[lakeZ-1][y][x] = BLOCK.DIRT; // taban
+      }
+    }
+  }
+
+  // 3–5 ağaç
+  const treeCount = 4;
+  for (let i=0; i<treeCount; i++) {
+    const tx = Math.floor(GRID_W*0.15) + Math.floor(Math.random()*Math.floor(GRID_W*0.3));
+    const ty = Math.floor(GRID_H*0.15) + Math.floor(Math.random()*Math.floor(GRID_H*0.3));
+    placeTree(tx, ty, 4 + Math.floor(Math.random()*2));
   }
 }
+
+// Basit ağaç (gövde: WOOD, yaprak: PLANK)
+function placeTree(ix, iy, h=5) {
+  // Gövdeyi zeminin biraz üstünden başlat (GRID_D küçükse uyum sağla)
+  const baseZ = Math.min(3, Math.max(0, GRID_D-2));
+  for (let z=baseZ; z<baseZ+h && z<GRID_D; z++) {
+    if (safeIn(ix, iy, z)) grid[z][iy][ix] = BLOCK.WOOD;
+  }
+
+  // Yaprak kümesi
+  const topZ = Math.min(baseZ + h - 1, GRID_D - 1);
+  for (let z=Math.max(baseZ, topZ-1); z<=topZ; z++) {
+    for (let dy=-2; dy<=2; dy++) for (let dx=-2; dx<=2; dx++) {
+      const xx = ix+dx, yy = iy+dy;
+      if ((Math.abs(dx)+Math.abs(dy)) <= 3) {
+        if (safeIn(xx, yy, z) && grid[z][yy][xx] === BLOCK.AIR) {
+          grid[z][yy][xx] = BLOCK.PLANK; // ← enum adını seninkine göre ayarla
+        }
+      }
+    }
+  }
+  if (safeIn(ix, iy, topZ+1)) grid[topZ+1][iy][ix] = BLOCK.PLANK;
+}
+
+function safeIn(x,y,z){
+  return x>=0 && y>=0 && z>=0 && x<GRID_W && y<GRID_H && z<GRID_D;
+}
+
+
+// Bu hücreye şimdi su dolabilir mi? (cooldown ve doluluk kontrolü)
+function canFillWater(x,y,z, nowMs){
+  if (!inRange(x,y,z)) return false;      // inRange: biz su sabitleri bölümünde tanımladık
+  if (grid[z][y][x] !== BLOCK.AIR) return false;
+  const k = wkey(x,y,z);
+  const until = waterCooldown.get(k);
+  if (until !== undefined && nowMs < until) return false; // cooldown devam
+  return true;
+}
+
+// Su akışı: önce aşağı (z-1), sonra aynı seviyeye; menzil ve hız sınırlı
+function stepWater(maxNew = WATER_MAX_PER_TICK){
+  const nowMs = performance.now();
+  let made = 0;
+
+  // Bu tikte işlenecek aktif su hücreleri
+  const batch = Array.from(waterActive);
+  waterActive.clear();
+
+  for (let i = 0; i < batch.length; i++){
+    const k  = batch[i];
+    const [sx,sy,sz] = k.split('|').map(Number);
+    const curDist = waterDist.get(k) ?? 0;
+
+    // 1) Öncelik: AŞAĞI (z-1)
+    const dz = sz - 1;
+    if (curDist + 1 <= WATER_MAX_RANGE && canFillWater(sx,sy,dz, nowMs)){
+      setBlock(sx,sy,dz, BLOCK.WATER);
+      activateWater(sx,sy,dz, curDist + 1);
+      activateWater(sx,sy,sz, curDist); // kaynak hücre ileride tekrar deneyebilir
+      if (++made >= maxNew) break;
+      continue; // bu tikte yana akma yok, önce düşme
+    }
+
+    // 2) Aynı seviyede yanlara (sağ, sol, ileri, geri)
+    const dirs = [[1,0],[-1,0],[0,1],[0,-1]];
+    for (const [dx,dy] of dirs){
+      const nx = sx + dx, ny = sy + dy, nz = sz;
+      if (curDist + 1 > WATER_MAX_RANGE) break;   // menzil sınırı
+      if (canFillWater(nx,ny,nz, nowMs)){
+        setBlock(nx,ny,nz, BLOCK.WATER);
+        activateWater(nx,ny,nz, curDist + 1);
+        if (++made >= maxNew) break;
+      }
+    }
+
+    // Kaynak hücreyi aktif tut (ileride yeni boşluklar için)
+    activateWater(sx,sy,sz, curDist);
+
+    if (made >= maxNew) break;
+  }
+}
+
+
+// --- grid dizileri (grid = [...]) oluşturulduktan hemen sonra: ---
+buildFlatWorld();
 
 // Materials
 const loader = new THREE.TextureLoader();
@@ -181,6 +343,7 @@ function addGlowLight(x,y,z){
   scene.add(light);
   glowLights.set(keyOf(x,y,z),light);
 }
+
 function removeGlowLight(x,y,z){
   const k=keyOf(x,y,z);
   const l=glowLights.get(k);
@@ -213,17 +376,50 @@ function removeBlockMesh(x,y,z){
     blocksGroup.remove(m); m.geometry.dispose?.(); meshesMap.delete(k);
   }
 }
+
 function setBlock(x,y,z,t){
   if(z<0||z>=GRID_D||y<0||y>=GRID_H||x<0||x>=GRID_W) return;
-  const prev=grid[z][y][x];
-  if(prev===t) return;
-  if(prev!==BLOCK.AIR) removeBlockMesh(x,y,z);
-  grid[z][y][x]=t;
-  if(t!==BLOCK.AIR) addBlockMesh(x,y,z,t);
+  const prev = grid[z][y][x];
+  if(prev === t) return;
+
+  // Mevcut mesh'i temizle
+  if(prev !== BLOCK.AIR) removeBlockMesh(x,y,z);
+
+  // Grid'i güncelle
+  grid[z][y][x] = t;
+
+  // Yeni mesh'i ekle
+  if(t !== BLOCK.AIR) addBlockMesh(x,y,z,t);
+
+// --- SU AKIŞ TETİKLEYİCİSİ ---
+if (t === BLOCK.WATER){
+  // Yeni su kondu → kaynaktır (mesafe 0)
+  activateWater(x,y,z, 0);
+} else if (t === BLOCK.AIR){
+  // Bir blok kırıldı → komşu sulardan akış tetiklenir
+  const nn = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
+  for (const [dx,dy,dz] of nn){
+    const nx=x+dx, ny=y+dy, nz=z+dz;
+    if (inRange(nx,ny,nz) && grid[nz][ny][nx] === BLOCK.WATER){
+      const dk = wkey(nx,ny,nz);
+      const d  = waterDist.get(dk) ?? 0;
+      activateWater(nx,ny,nz, d);  // komşu su, kendi mesafesiyle aktif
+    }
+  }
+}
+// Eğer ÖNCEKİ durum WATER ise ve şimdi AIR olduysa → cooldown
+if (prev === BLOCK.WATER && t === BLOCK.AIR){
+  waterCooldown.set(wkey(x,y,z), performance.now() + WATER_COOLDOWN_MS);
+}
+
+
+  // -------------------------------------------
 
   // Obsidiyen konduğunda portal dene
-  if(t===BLOCK.OBSIDIAN) tryFormPortalAt(x,y,z);
+  if (t === BLOCK.OBSIDIAN) tryFormPortalAt(x,y,z);
 }
+
+
 function rebuildMeshes(){
   // temizle
   while(blocksGroup.children.length) blocksGroup.remove(blocksGroup.children[0]);
@@ -241,11 +437,138 @@ function topSolidZ(ix,iy){
   for(let z=GRID_D-1; z>=0; z--) if(grid[z][iy][ix]!==BLOCK.AIR && grid[z][iy][ix]!==BLOCK.WATER && grid[z][iy][ix]!==BLOCK.LAVA && grid[z][iy][ix]!==BLOCK.PORTAL) return z;
   return -1;
 }
-function isSolidAt(ix,iy,iz){
-  if(iz<0||iz>=GRID_D||iy<0||iy>=GRID_H||ix<0||ix>=GRID_W) return false;
-  const b=grid[iz][iy][ix];
-  return b!==BLOCK.AIR && b!==BLOCK.WATER && b!==BLOCK.LAVA && b!==BLOCK.PORTAL;
+
+// Üstünde en az 2 boş kat olan EN DÜŞÜK sağlam zemin (alttan yukarı ara)
+function walkableTopZ(ix, iy){
+  if (ix<0 || iy<0 || ix>=GRID_W || iy>=GRID_H) return -1;
+
+  for (let z = 0; z < GRID_D; z++) {
+    if (isSolidAt(ix, iy, z) && !isSolidAt(ix, iy, z+1) && !isSolidAt(ix, iy, z+2)) {
+      return z;                     // ilk bulduğunu döndür → gerçek “yer”
+    }
+  }
+
+
+// hiç uygun yüzey yoksa emniyet: normal topSolidZ ya da zemin
+const t = topSolidZ(ix, iy);
+return (t >= 0 ? Math.max(0, Math.min(t, GRID_D-3)) : -1);
 }
+
+// Sürekli konum → hücre endeksi (merkezlere göre, simetrik)
+const cellIdx = v => Math.floor(v + 0.5);
+
+
+function isSolidAt(ix, iy, iz){
+  if (iz < 0 || iz >= GRID_D || iy < 0 || iy >= GRID_H || ix < 0 || ix >= GRID_W) return false;
+  const b = grid[iz][iy][ix];
+  // Üzerinde yürünemeyen, “katı” bloklar
+  return b !== BLOCK.AIR && b !== BLOCK.WATER && b !== BLOCK.LAVA && b !== BLOCK.PORTAL;
+}
+
+
+// Daire (merkez cx,cy; yarıçap r) ile [ix,ix+1]x[iy,iy+1] karesi
+// SADECE gerçek penetrasyonda true döner (dokunma ≠ çarpışma)
+function cellOverlapsCircle(cx, cy, ix, iy, r){
+  const closestX = Math.max(ix, Math.min(cx, ix + 1));
+  const closestY = Math.max(iy, Math.min(cy, iy + 1));
+  const dx = cx - closestX, dy = cy - closestY;
+  // Eşik: sadece d^2 < r^2 ise çarpışma; eşitlik (dokunma) çarpışma sayılmaz
+  return (dx*dx + dy*dy) < (r*r - 1e-6);
+}
+
+
+function canStandAt(x, y, baseZ){
+  const r = PLAYER_RADIUS;
+  const EPS = 1e-4; // sınırda asimetriyi kırmak için küçük pay
+
+  // Tarama aralığını simetrik + küçük payla al
+  const ix0 = Math.floor(x - r - EPS), ix1 = Math.floor(x + r + EPS);
+  const iy0 = Math.floor(y - r - EPS), iy1 = Math.floor(y + r + EPS);
+
+  for (let iy = iy0; iy <= iy1; iy++){
+    for (let ix = ix0; ix <= ix1; ix++){
+      if (!cellOverlapsCircle(x, y, ix, iy, r)) continue; // daire kareye girmiyor → geç
+      // 2 blok boy: baseZ+1 ve baseZ+2 boş olmalı
+      if (isSolidAt(ix, iy, baseZ + 1) || isSolidAt(ix, iy, baseZ + 2)) return false;
+    }
+  }
+  return true;
+}
+
+
+// Hedef hücrede (ix,iy) taban baseZ iken, oyuncunun kapladığı
+// iki kat (baseZ+1 ve baseZ+2) içinde SU var mı?
+function isWaterColumn(ix, iy, baseZ){
+  if (ix<0 || iy<0 || ix>=GRID_W || iy>=GRID_H) return false;
+  const z1 = baseZ + 1, z2 = baseZ + 2;
+  const w1 = (z1>=0 && z1<GRID_D) ? (grid[z1][iy][ix] === BLOCK.WATER) : false;
+  const w2 = (z2>=0 && z2<GRID_D) ? (grid[z2][iy][ix] === BLOCK.WATER) : false;
+  return w1 || w2;
+}
+
+
+// SKIN yoksa küçük bir pay tanımla
+const SKIN = 0.01;
+
+// Eksen bazlı çarpışma çözümü: 4 yönde de sıfıra-sıfır
+// Duvarlardan dışarı itme — simetrik ve kararlı
+
+function resolveWallCollisions(){
+  const r    = PLAYER_RADIUS;
+  const SKIN = 0.002;   // daha küçük pay
+  const EPS  = 1e-6;
+
+  const baseZ = Math.max(0, Math.floor(player.z - EYE_HEIGHT));
+
+  for (let pass = 0; pass < 3; pass++){
+    let moved = false;
+
+    const px = player.x, py = player.y;
+
+    // Merkez-simetrik tarama
+    const ix0 = cellIdx(px - r - 0.5) - 1;
+    const ix1 = cellIdx(px + r + 0.5) + 1;
+    const iy0 = cellIdx(py - r - 0.5) - 1;
+    const iy1 = cellIdx(py + r + 0.5) + 1;
+
+    for (let iy = iy0; iy <= iy1; iy++){
+      for (let ix = ix0; ix <= ix1; ix++){
+        if (!(isSolidAt(ix,iy,baseZ+1) || isSolidAt(ix,iy,baseZ+2))) continue;
+
+        const cx = ix + 0.5, cy = iy + 0.5;
+        const dx = px - cx,   dy = py - cy;
+
+        let overX = (r + 0.5) - Math.abs(dx);
+        let overY = (r + 0.5) - Math.abs(dy);
+
+        // Sadece gerçek penetrasyonda it; "dokunma"yı itme sayma
+        if (overX <= SKIN || overY <= SKIN) continue;
+
+        overX -= SKIN; overY -= SKIN;
+
+        if (Math.abs(overX - overY) > EPS){
+          if (overX < overY){
+            player.x += (dx < 0 ? -overX : overX);
+          } else {
+            player.y += (dy < 0 ? -overY : overY);
+          }
+        } else {
+          // Tam eşitlikte tarafsız seçim
+          if (Math.abs(dx) >= Math.abs(dy)){
+            player.x += (dx < 0 ? -overX : overX);
+          } else {
+            player.y += (dy < 0 ? -overY : overY);
+          }
+        }
+        moved = true;
+      }
+    }
+    if (!moved) break;
+  }
+}
+
+
+
 // Dünya tipleri
 let world = "overworld"; // veya "nether"
 
@@ -314,74 +637,139 @@ function tryPlace(x,y,z,t){ if(z>=0&&z<GRID_D&&y>=0&&y<GRID_H&&x>=0&&x<GRID_W &&
 rebuildMeshes();
 
 // Player
-const player={x:GRID_W/2,y:GRID_H/2,z:5, yaw:0,pitch:0, speed:0.0};
+const player = {
+  x: GRID_W/2,
+  y: GRID_H/2,
+  z: 5,
+  yaw: 0,
+  pitch: 0,
+  vz: 0,              // dikey hız (zıplama/yerçekimi için)
+  grounded: false,    // yere temas durumu
+  speed: 0.0          // (kullanılmıyorsa kaldırılabilir)
+};
+
 (function snapToGroundAtStart(){
-  const ix=Math.floor(player.x), iy=Math.floor(player.y);
-  const zTop = topSolidZ(ix,iy);
-  player.z = (zTop<0?0:zTop) + EYE_HEIGHT;
+  const ix = cellIdx(player.x), iy = cellIdx(player.y);
+  const zTop = walkableTopZ(ix, iy);
+  player.z = (zTop < 0 ? 0 : zTop) + EYE_HEIGHT;
 })();
 
 // Pointer lock + mouse
-renderer.domElement.addEventListener('click',()=>{ renderer.domElement.requestPointerLock(); });
-document.addEventListener('pointerlockchange',()=>{ if(document.pointerLockElement===renderer.domElement){ document.addEventListener('mousemove',onMouseMove); } else { document.removeEventListener('mousemove',onMouseMove); } });
+renderer.domElement.addEventListener('click', ()=>{
+  renderer.domElement.requestPointerLock();
+});
+document.addEventListener('pointerlockchange', ()=>{
+  if (document.pointerLockElement === renderer.domElement){
+    document.addEventListener('mousemove', onMouseMove);
+  } else {
+    document.removeEventListener('mousemove', onMouseMove);
+  }
+});
 function onMouseMove(e){
-  player.yaw-=e.movementX*0.0025;
-  player.pitch-=e.movementY*0.0025;
-  player.pitch=Math.max(-Math.PI/2,Math.min(Math.PI/2,player.pitch));
-  camera.rotation.set(player.pitch,player.yaw,0);
+  player.yaw   -= e.movementX * 0.0025;
+  player.pitch -= e.movementY * 0.0025;
+  player.pitch = Math.max(-Math.PI/2, Math.min(Math.PI/2, player.pitch));
+  // 'YXZ' sırasına uygun atama: y= yaw, x= pitch, z=0 (roll yok)
+  camera.rotation.set(player.pitch, player.yaw, 0);
 }
 
 // Keys
-const keys={};
-window.addEventListener('keydown', e=>{
-  const k=e.key.toLowerCase(); keys[k]=true;
+const keys = {};
+window.addEventListener('keydown', (e)=>{
+  const k = e.key.toLowerCase();
+  keys[k] = true;
+
+  // Space (zıplama) — hem e.code hem e.key kontrolü
+  if (e.code === 'Space' || e.key === ' ') {
+    keys['space'] = true;          // animate() içinde bunu okuyacağız
+    // keys[' '] = true;           // istersen bunu da set edebilirsin
+    e.preventDefault();            // sayfanın aşağı kaymasını engelle
+  }
+
   // Envanter toggle
-  if(k==='e'){ toggleInventory(); e.preventDefault(); }
+  if (k === 'e'){
+    toggleInventory();
+    e.preventDefault();
+  }
 });
-window.addEventListener('keyup', e=>{ keys[e.key.toLowerCase()]=false; });
+
+window.addEventListener('keyup', (e)=>{
+  const k = e.key.toLowerCase();
+  keys[k] = false;
+
+  // Space bırakma
+  if (e.code === 'Space' || e.key === ' ') {
+    keys['space'] = false;
+    // keys[' '] = false;
+    e.preventDefault();
+  }
+});
 
 // Raycast
-const raycaster=new THREE.Raycaster(); raycaster.far=6;
-function getCenterRay(){ const dir=new THREE.Vector3(0,0,-1).applyEuler(camera.rotation); raycaster.set(camera.position,dir); const intr=raycaster.intersectObjects(blocksGroup.children,false); return intr.length?intr[0]:null; }
+const raycaster = new THREE.Raycaster();
+raycaster.far = 6;
+function getCenterRay(){
+  const dir = new THREE.Vector3(0,0,-1).applyEuler(camera.rotation);
+  raycaster.set(camera.position, dir);
+  const intr = raycaster.intersectObjects(blocksGroup.children, false);
+  return intr.length ? intr[0] : null;
+}
 
 // Break/place
-window.addEventListener('mousedown',e=>{
-  if(document.pointerLockElement!==renderer.domElement) return;
-  if(e.button===0){ const it=getCenterRay(); if(it){ const u=it.object.userData; setBlock(u.x,u.y,u.z,BLOCK.AIR); } }
-  if(e.button===2){
-    const it=getCenterRay(); if(it){
-      const u=it.object.userData; const n=it.face.normal;
-      const tx=u.x+Math.round(n.x), ty=u.y+Math.round(n.z), tz=u.z+Math.round(n.y);
-      if(tx>=0&&ty>=0&&tz>=0&&tx<GRID_W&&ty<GRID_H&&tz<GRID_D){
-        if(grid[tz][ty][tx]===BLOCK.AIR){ setBlock(tx,ty,tz,selectedBlock); }
+window.addEventListener('mousedown', (e)=>{
+  if (document.pointerLockElement !== renderer.domElement) return;
+  if (e.button === 0){
+    const it = getCenterRay();
+    if (it){
+      const u = it.object.userData;
+      setBlock(u.x, u.y, u.z, BLOCK.AIR);
+    }
+  }
+  if (e.button === 2){
+    const it = getCenterRay();
+    if (it){
+      const u = it.object.userData; const n = it.face.normal;
+      const tx = u.x + Math.round(n.x),
+            ty = u.y + Math.round(n.z),
+            tz = u.z + Math.round(n.y);
+      if (tx>=0 && ty>=0 && tz>=0 && tx<GRID_W && ty<GRID_H && tz<GRID_D){
+        if (grid[tz][ty][tx] === BLOCK.AIR){
+          setBlock(tx, ty, tz, selectedBlock);
+        }
       }
     }
   }
 });
-window.addEventListener('contextmenu',e=>{ if(document.pointerLockElement===renderer.domElement) e.preventDefault(); });
+window.addEventListener('contextmenu', (e)=>{
+  if (document.pointerLockElement === renderer.domElement) e.preventDefault();
+});
 
 // Toolbar
-const toolbar=[BLOCK.DIRT,BLOCK.GRASS,BLOCK.SAND,BLOCK.WOOD,BLOCK.PLANK,BLOCK.STONE,BLOCK.WATER,BLOCK.GRAVEL,BLOCK.GLASS,BLOCK.GLOWSTONE,BLOCK.TNT,BLOCK.LAVA,BLOCK.OBSIDIAN];
-let selectedIndex=0, selectedBlock=toolbar[selectedIndex];
-const toolbarEl=document.getElementById('toolbar'), blockNameEl=document.getElementById('blockName');
+const toolbar = [
+  BLOCK.DIRT,BLOCK.GRASS,BLOCK.SAND,BLOCK.WOOD,BLOCK.PLANK,BLOCK.STONE,
+  BLOCK.WATER,BLOCK.GRAVEL,BLOCK.GLASS,BLOCK.GLOWSTONE,BLOCK.TNT,BLOCK.LAVA,BLOCK.OBSIDIAN
+];
+let selectedIndex = 0, selectedBlock = toolbar[selectedIndex];
+const toolbarEl = document.getElementById('toolbar'), blockNameEl = document.getElementById('blockName');
 function iconFor(b){
   switch(b){
-    case BLOCK.DIRT:return TEX.dirt;
-    case BLOCK.GRASS:return TEX.grass_side;
-    case BLOCK.SAND:return TEX.sand;
-    case BLOCK.WOOD:return TEX.wood;
-    case BLOCK.PLANK:return TEX.plank;
-    case BLOCK.STONE:return TEX.stone;
-    case BLOCK.WATER:return TEX.water;
-    case BLOCK.GRAVEL:return TEX.gravel;
-    case BLOCK.GLASS:return TEX.glass;
-    case BLOCK.GLOWSTONE:return TEX.glowstone;
-    case BLOCK.TNT:return TEX.tnt_side;
-    case BLOCK.LAVA:return TEX.lava;
-    case BLOCK.OBSIDIAN:return TEX.obsidian;
-    default:return TEX.dirt;
+    case BLOCK.DIRT:      return TEX.dirt;
+    case BLOCK.GRASS:     return TEX.grass_side;
+    case BLOCK.SAND:      return TEX.sand;
+    case BLOCK.WOOD:      return TEX.wood;
+    case BLOCK.PLANK:     return TEX.plank;
+    case BLOCK.STONE:     return TEX.stone;
+    case BLOCK.WATER:     return TEX.water;
+    case BLOCK.GRAVEL:    return TEX.gravel;
+    case BLOCK.GLASS:     return TEX.glass;
+    case BLOCK.GLOWSTONE: return TEX.glowstone;
+    case BLOCK.TNT:       return TEX.tnt_side;
+    case BLOCK.LAVA:      return TEX.lava;
+    case BLOCK.OBSIDIAN:  return TEX.obsidian;
+    default:              return TEX.dirt;
   }
 }
+
 function buildToolbar(){
   toolbarEl.innerHTML='';
   toolbar.forEach((b,i)=>{
@@ -425,20 +813,6 @@ function buildInventory(){
   });
 }
 
-// Sıvı yayılması (SU)
-function stepWater(){
-  const toAdd=[]; const maxAdds=15;
-  outer: for(let z=0; z<GRID_D; z++) for(let y=0;y<GRID_H;y++) for(let x=0;x<GRID_W;x++){
-    if(grid[z][y][x]!==BLOCK.WATER) continue;
-    if(z-1>=0 && grid[z-1][y][x]===BLOCK.AIR){ toAdd.push([z-1,y,x]); if(toAdd.length>=maxAdds) break outer; continue; }
-    const neigh=[[0,1,0],[0,-1,0],[1,0,0],[-1,0,0]];
-    for(const d of neigh){
-      const nx=x+d[0], ny=y+d[1], nz=z+d[2];
-      if(nx>=0&&ny>=0&&nx<GRID_W&&ny<GRID_H&&grid[nz]?.[ny]?.[nx]===BLOCK.AIR){ toAdd.push([nz,ny,nx]); if(toAdd.length>=maxAdds) break outer; }
-    }
-  }
-  for(const [z,y,x] of toAdd){ if(grid[z][y][x]===BLOCK.AIR){ setBlock(x,y,z,BLOCK.WATER); } }
-}
 
 // LAV yayılması + etkileşimler
 function stepLava(){
@@ -502,15 +876,45 @@ function updateUnderwater(){
 const mobsGroup = new THREE.Group(); scene.add(mobsGroup);
 const mobGeo = new THREE.PlaneGeometry(BLOCK_SIZE,BLOCK_SIZE);
 const mobs = [];
-function addMob(x,y,z,type){
+const MOB_RADIUS = 0.4;
+
+function repelFromMobs(dt){
+  const rr  = PLAYER_RADIUS + MOB_RADIUS;
+  const rr2 = rr * rr;
+  for (const m of mobs){
+    const dx = player.x - m.x;
+    const dy = player.y - m.y;
+    const d2 = dx*dx + dy*dy;
+    if (d2 < rr2){
+      const d  = Math.sqrt(Math.max(d2, 1e-6));
+      const nx = dx / d, ny = dy / d;
+      const push = (rr - d) * 0.75;   // 0.6–0.9 arası deneyebilirsin
+      if (push > 0){
+        tryMoveTo(player.x + nx * push, player.y);
+        tryMoveTo(player.x,             player.y + ny * push);
+      }
+    }
+  }
+}
+
+function addMob(x,y,_z,type){
+  // doğduğu hücrenin en üst sağlam bloğunun ÜSTÜ (yürünecek yüzey)
+  const ix = x|0, iy = y|0;
+let zTop = walkableTopZ(ix,iy); if (zTop<0) zTop=0;
+const zSpawn = zTop + 1; // bloğun üstündeki hücre
+
   const tex = loader.load(type===BLOCK.PIG?TEX.pig:TEX.villager);
   tex.magFilter = THREE.NearestFilter; tex.minFilter = THREE.LinearMipMapLinearFilter;
   const mat = new THREE.MeshBasicMaterial({map:tex,transparent:true});
   const mesh = new THREE.Mesh(mobGeo,mat);
-  mesh.position.copy(posFor(x,y,z)); mesh.position.y += BLOCK_SIZE/2;
+
+  // ÖNEMLİ: posFor(..., zSpawn) ve **EKSTRA +BLOCK_SIZE/2 YOK**
+  mesh.position.copy(posFor(x,y,zSpawn));
   mesh.rotation.y = Math.PI; mobsGroup.add(mesh);
-  mobs.push({x,y,z,mesh,type,dir:[Math.random()-.5,Math.random()-.5]});
+
+  mobs.push({x,y,z:zSpawn,mesh,type,dir:[Math.random()-.5,Math.random()-.5]});
 }
+
 addMob(GRID_W/2+5,GRID_H/2+5,2,BLOCK.PIG);
 addMob(GRID_W/2-5,GRID_H/2-3,2,BLOCK.PIG);
 addMob(GRID_W/2+3,GRID_H/2-4,2,BLOCK.PIG);
@@ -523,15 +927,29 @@ function updateMobs(dt){
     let nz = m.mesh.position.z + m.dir[1]*dt*1.2;
     const ix = Math.floor(nx/BLOCK_SIZE+GRID_W/2);
     const iy = Math.floor(nz/BLOCK_SIZE+GRID_H/2);
+
     let zTop = topSolidZ(ix,iy);
     if(zTop<0) zTop=0;
-    const targetY = posFor(0,0,zTop).y + BLOCK_SIZE/2;
-    if(isSolidAt(ix,iy,zTop+1) || isSolidAt(ix,iy,zTop+2)){ m.dir[0]*=-1; m.dir[1]*=-1; continue; }
+
+    // ↓↓↓ BURAYI DEĞİŞTİRİYORUZ ↓↓↓
+    const curZ  = Math.floor((m.mesh.position.y - BLOCK_SIZE/2)/BLOCK_SIZE);
+    const zWalk = Math.min(zTop, curZ + 1);       // en fazla 1 blok yukarı adım
+    const targetY = posFor(0,0, zWalk + 1).y;     // bloğun üstündeki hücre merkezi
+    // ↑↑↑ BURAYI DEĞİŞTİRİYORUZ ↑↑↑
+
+    if(isSolidAt(ix,iy,zTop+1) || isSolidAt(ix,iy,zTop+2)){ 
+      m.dir[0]*=-1; m.dir[1]*=-1; 
+      continue; 
+    }
     m.mesh.position.x = nx; 
     m.mesh.position.z = nz;
-    m.mesh.position.y += (targetY-m.mesh.position.y)*dt*5;
-    const curZ = Math.floor((m.mesh.position.y - BLOCK_SIZE/2)/BLOCK_SIZE);
-    if(curZ < zTop-6){ m.mesh.material.color.set(0xff0000); } else { m.mesh.material.color.set(0xffffff); }
+    m.mesh.position.y += (targetY - m.mesh.position.y) * Math.min(1, 8*dt);
+
+    // curZ’i yukarıda zaten hesapladık; istersen bu satırı tamamen kaldır:
+    // const curZ = Math.floor((m.mesh.position.y - BLOCK_SIZE/2)/BLOCK_SIZE);
+
+    if(curZ < zTop-6){ m.mesh.material.color.set(0xff0000); } 
+    else { m.mesh.material.color.set(0xffffff); }
   }
 }
 
@@ -716,57 +1134,209 @@ function generateOverworld(){
 
 // HAREKET (yerçekimsiz + adım)
 const clock=new THREE.Clock();
-function tryMoveTo(nx,ny){
-  const cx = Math.floor(player.x), cy = Math.floor(player.y);
-  const tx = Math.floor(nx), ty = Math.floor(ny);
-  let curTop = topSolidZ(cx,cy); if(curTop<0) curTop=0;
-  let tarTop = topSolidZ(tx,ty); if(tarTop<0) tarTop=0;
-  const headClear1 = !isSolidAt(tx,ty,tarTop+1);
-  const headClear2 = !isSolidAt(tx,ty,tarTop+2);
-  if(!(headClear1 && headClear2)) return false;
-  if(tarTop - curTop > MAX_STEP) return false;
-  player.x = nx; player.y = ny; player.z = tarTop + EYE_HEIGHT;
+
+
+function tryMoveTo(nx, ny){
+  // İlerleme yönleri (+1, 0, -1)
+  const dirX = Math.sign(nx - player.x);
+  const dirY = Math.sign(ny - player.y);
+
+  // Hücre endeksi için YÖNSEL epsilon (pozitifte mevcut hücreyi biraz tercih et)
+  const IDX_EPS = 1e-4;
+  const cx = cellIdx(player.x), cy = cellIdx(player.y);
+  const tx = cellIdx(nx - dirX * IDX_EPS);
+  const ty = cellIdx(ny - dirY * IDX_EPS);
+
+  // Bulunduğun yerde zemin ve "havada mıyım?"
+  let curTop = walkableTopZ(cx, cy); if (curTop < 0) curTop = 0;
+  const minZHere = curTop + EYE_HEIGHT;
+  const airborne = (player.z > minZHere + 1e-3) || (player.vz > 0);
+
+  if (airborne){
+    // Havadayken: sadece yan çarpışmayı kontrol et
+    const baseZ = Math.floor(player.z - EYE_HEIGHT);
+    if (!canStandAt(nx, ny, baseZ)) return false;
+    player.x = nx; player.y = ny;
+    return true; // z'ye dokunma
+  }
+
+  // Yerde: hedef yüzey
+  let tarTop = walkableTopZ(tx, ty); if (tarTop < 0) tarTop = 0;
+
+  // Sadece YUKARI adımı sınırlıyoruz (aşağı adım serbest)
+  if (tarTop > curTop && (tarTop - curTop) > MAX_STEP) return false;
+
+  // AŞAĞI adımda kontrolü "mevcut yükseklikte" yap (görünmez duvarı kaldırır)
+  const baseZForCheck = (tarTop < curTop) ? curTop : tarTop;
+
+  // Yan çarpışma + su istisnası
+  if (!canStandAt(nx, ny, baseZForCheck)) {
+    if (isWaterColumn(tx, ty, tarTop)) {
+      player.x = nx; player.y = ny; player.z = tarTop + EYE_HEIGHT;
+      return true;
+    }
+    return false;
+  }
+
+  // Uygula
+  player.x = nx; 
+  player.y = ny;
+
+  // Sadece düşerken zemine yapıştır (zıplamayı bozmaz)
+  if (player.vz <= 0) {
+    const minZ = tarTop + EYE_HEIGHT;
+    if (player.z < minZ) player.z = minZ;
+  }
   return true;
 }
 
+
+
+// X-önce ve Z-önce iki sıralamayı da deneyip en iyi ilerlemeyi uygular
+function applyHorizontalMove(nx, ny){
+  const x0 = player.x, y0 = player.y;
+
+  // Sıra A: X -> Z
+  let ax = x0, ay = y0;
+  if (nx !== x0) { tryMoveTo(nx, ay); ax = player.x; ay = player.y; }  // X
+  if (ny !== ay) { tryMoveTo(ax, ny); }                                 // Z
+  const dxA = player.x - x0, dyA = player.y - y0;
+  const distA = dxA*dxA + dyA*dyA;
+
+  // Geri sar
+  player.x = x0; player.y = y0;
+
+  // Sıra B: Z -> X
+  let bx = x0, by = y0;
+  if (ny !== y0) { tryMoveTo(bx, ny); bx = player.x; by = player.y; }   // Z
+  if (nx !== bx) { tryMoveTo(nx, by); }                                 // X
+  const dxB = player.x - x0, dyB = player.y - y0;
+  const distB = dxB*dxB + dyB*dyB;
+
+  // En iyi olanı bırak; kötü olanı geri sar
+  if (distA >= distB){
+    player.x = x0; player.y = y0;
+    if (nx !== x0) tryMoveTo(nx, y0);
+    if (ny !== y0) tryMoveTo(player.x, ny);
+  }
+  // else: distB zaten oyuncu üzerinde uygulanmış durumda
+}
+
+
+// Zaman ölçer (tepeye yakın bir yere koy)
+let last = performance.now();
+
+
 function animate(){
-  const dt=Math.min(0.05,clock.getDelta());
-  const forward=(keys['w']?1:0)-(keys['s']?1:0);
-  const strafe=(keys['d']?1:0)-(keys['a']?1:0);
-  const spd=3.5;
-  let dx=(Math.cos(player.yaw)*forward-Math.sin(player.yaw)*strafe)*spd*dt;
-  let dy=(Math.sin(player.yaw)*forward+Math.cos(player.yaw)*strafe)*spd*dt;
+  const now = performance.now();
+  const dt  = Math.min((now - last) / 1000, 0.05); // saniye, 50ms tavan
+  last = now;
 
-  if(dx!==0){ const nx = player.x + dx; tryMoveTo(nx, player.y); }
-  if(dy!==0){ const ny = player.y + dy; tryMoveTo(player.x, ny); }
+  // --- WASD girişleri ---
+  const forward = (keys['w']?1:0) - (keys['s']?1:0);
+  const strafe  = (keys['d']?1:0) - (keys['a']?1:0);
 
-  camera.position.copy(posFor(player.x,player.y,player.z));
+  // Girişi normalize et (diyagonal hız artışı olmasın)
+  let inX = strafe, inY = forward;
+  const mag = Math.hypot(inX, inY);
+  if (mag > 0) { inX /= mag; inY /= mag; }
 
-  // Simülasyonlar
-  if(Math.random()<0.25) stepWater();
-  if(Math.random()<0.15) stepLava();
-  stepFall();
-  updateUnderwater();
+  // Zıplama tuşu
+  const jumpPressed = keys['space'] || keys[' '];
+
+  // Suda hız azaltma
+const standingInWater = isWaterColumn(
+  cellIdx(player.x),
+  cellIdx(player.y),
+  Math.floor(player.z - EYE_HEIGHT)
+);
+
+
+  const speedMul = standingInWater ? 0.6 : 1.0;
+
+  // Taban hız (istersen 3.5 bırak) + su çarpanı
+  const baseSpd = 3.5 * Math.SQRT2;
+  const spd = baseSpd * speedMul;
+
+  // Kameranın baktığı yöne göre hareket vektörü
+  const fwd = new THREE.Vector3();
+  camera.getWorldDirection(fwd);
+  fwd.y = 0; if (fwd.lengthSq()>0) fwd.normalize();
+  const up = new THREE.Vector3(0,1,0);
+  const right = new THREE.Vector3().crossVectors(fwd, up).normalize();
+
+  const move = new THREE.Vector3()
+    .addScaledVector(fwd,   inY * spd * dt)
+    .addScaledVector(right, inX * spd * dt);
+
+  // World→grid eşlemesi ve yatay hareket
+  const nx = player.x + move.x;
+  const ny = player.y + move.z;
+
+// Çarpışma/step kontrolü (iki sırayı da dene → en iyi ilerlemeyi uygula)
+applyHorizontalMove(nx, ny);
+
+
+  // Duvarlardan dışarı it (yan sızmaları düzelt)
+  resolveWallCollisions();
+
+  // --- DİKEY FİZİK (zıplama / yerçekimi) ---
+  const ix = cellIdx(player.x), iy = cellIdx(player.y);
+  let groundTop = walkableTopZ(ix, iy); if (groundTop < 0) groundTop = 0;
+  const minZ = groundTop + EYE_HEIGHT;
+
+  const inWater = standingInWater; // aynı bilgiyi kullan
+  const onGround = (player.z <= minZ + 1e-3) && (player.vz <= 0);
+
+  // Zıplama: zeminde veya suda
+  if (jumpPressed && (onGround || inWater)) {
+    player.vz = JUMP_V; // örn: 7.0 → ~1 bloktan biraz fazla
+  }
+
+  // Yerçekimi (suda daha zayıf)
+  const G = inWater ? GRAVITY * 0.5 : GRAVITY; // örn: GRAVITY=-22
+  player.vz += G * dt;
+
+  // Dikey konum adayı
+  let newZ = player.z + player.vz * dt;
+
+  // Tavan çarpışması (baş hizası)
+  const newBaseZ = Math.floor(newZ - EYE_HEIGHT);
+  const headHits = isSolidAt(ix, iy, newBaseZ + 2);
+  if (headHits && player.vz > 0) {
+    newZ = player.z;     // tavan vuruldu: yukarı hareketi iptal
+    player.vz = 0;
+  }
+
+  // Zemine iniş (zeminin altına geçme)
+  if (newZ < minZ) {
+    newZ = minZ;
+    player.vz = 0;
+    player.grounded = true;
+  } else {
+    player.grounded = false;
+  }
+
+  player.z = newZ;
+  // --- DİKEY FİZİK SONU ---
+
+  // Kamera → oyuncu konumu
+  camera.position.copy( posFor(player.x, player.y, player.z) );
+
+  // NPC güncellemeleri ve render
   updateMobs(dt);
-
-  // TNT & portal kontrolleri
-  checkIgnitionAroundTNT();
-  updateTNT(dt);
-  checkPortalTouch(dt);
-
-  renderer.render(scene,camera);
+  repelFromMobs(dt);
+  // --- WATER FLOW zamanlayıcı ---
+  waterTimer += dt * 1000;
+  if (waterTimer >= WATER_TICK_MS){
+    stepWater();
+    waterTimer = 0;
+}
+  renderer.render(scene, camera);
   requestAnimationFrame(animate);
 }
-animate();
+animate();   // ← BUNU EKLE
 
-// Mouse (başlangıç için)
-camera.rotation.set(0,0,0);
-function onMouseMove(e){
-  player.yaw-=e.movementX*0.0025;
-  player.pitch-=e.movementY*0.0025;
-  player.pitch=Math.max(-Math.PI/2,Math.min(Math.PI/2,player.pitch));
-  camera.rotation.set(player.pitch,player.yaw,0);
-}
 </script>
 </body>
 </html>
