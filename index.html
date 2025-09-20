@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>Minecraft-like 3D — Envanter + TNT + Lav + Obsidiyen + Portal</title>
 
- 
+
 <style>
 html,body { height:100%; margin:0; background:#111; overflow:hidden; font-family:Segoe UI, Roboto, Arial }
 #info { position:fixed; left:12px; top:12px; z-index:50; color:#ddd; background:rgba(0,0,0,0.45); padding:10px; border-radius:8px; }
@@ -59,11 +59,11 @@ canvas { display:block }
 <script src="https://cdn.jsdelivr.net/npm/three@0.154.0/build/three.min.js"></script>
 <script>
 // Eskisi gibi büyük olmasın:
-const BLOCK_SIZE=0.4, GRID_W=48, GRID_H=48, GRID_D=48;
-const EYE_HEIGHT = 1.6; // 2 blok boy için uygun göz hizası
+const BLOCK_SIZE=1.0, GRID_W=48, GRID_H=48, GRID_D=48;
+const EYE_HEIGHT = 1.2; // 2 blok boy için uygun göz hizası
 const MAX_STEP = 1;
 
-const PLAYER_RADIUS = 0.48; // simetrik tolerans için bir tık küçük
+const PLAYER_RADIUS = 0.36; // simetrik tolerans için bir tık küçük
 
 
 // --- WATER FLOW (ayarlar + veri yapıları) ---
@@ -83,6 +83,9 @@ const waterDist   = new Map();       // key -> distance (integer)
 // Kırılan hücrelerde geri dolmayı erteleme
 const waterCooldown = new Map();     // key -> cooldownSON (performance.now())
 
+// Her aktif akışkan hücrenin türü
+const waterType = new Map(); // key -> BLOCK.WATER/BLOCK.KETCAP/BLOCK.HARDAL
+
 const wkey = (x,y,z) => `${x}|${y}|${z}`;
 
 // Hücre ızgarasında güvenli mi?
@@ -91,9 +94,10 @@ function inRange(x,y,z){
 }
 
 // Su akışını başlat/yeniden etkinleştir (mesafeyi tut)
-function activateWater(x,y,z,dist=0){
+function activateWater(x,y,z,dist=0,t=BLOCK.WATER){
   if (!inRange(x,y,z)) return;
   const k = wkey(x,y,z);
+  waterType.set(k, t);
   const old = waterDist.get(k);
   // Daha kısa mesafeyle geliyorsa güncelle
   if (old === undefined || dist < old){
@@ -111,13 +115,13 @@ const JUMP_V  = 7.0;   // ↑ ~1 bloktan biraz fazla zıplama
 const TEX = {
   dirt:'https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcRvJmdfF1rbNy8hPiV7Y4Zk8LQq2DVII6vvbA&s',
   gravel:'https://p.novaskin.me/3227683066.png?class=thumbnail',
-  stone:'https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcSd76k-uLoF78Xp4IjyM7tmc4RQUrBGJWZSPw&s',
+  stone:'https://p.novaskin.me/1rh3gqcxpyp.png?class=thumbnail',
   wood:'https://p.novaskin.me/3835313885.png?class=thumbnail',
   sand:'https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcRRIFznsJS37WaQCbXa4UJ8L51DLAnJQ1hvEA&s',
   plank:'https://p.novaskin.me/5736853225.png',
   water:'https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcRsFRp0JoDCeuAuE4Kpzv5Q08tkk34U-ofd1w&s',
-  grass_side:'https://p.novaskin.me/4840324147.png?class=thumbnail',
-  grass_top:'https://p.novaskin.me/5640963127.png?class=thumbnail',
+  grass_side:'https://static.wikia.nocookie.net/minecraft_gamepedia/images/3/3b/Grass_Block_%28side_texture%29_JE2_BE2.png/revision/latest?cb=20200921204925',
+  grass_top:'https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQAKhPqte9xg9p6EFXEtmku52Llhhf7v7gLF5lCbiRvzAFzyYxNlKBcgAezD_4IrzUypGU&usqp=CAU',
   pig:'https://media.tenor.com/xmQHvbjDqIQAAAAj/minecraft.gif',
   villager:'https://r2.mcpedl.com/submissions/97539/images/new-villager-animations_2.gif',
   glass:'https://p.novaskin.me/6507933547.png?class=thumbnail',
@@ -127,22 +131,38 @@ const TEX = {
   tnt_bottom:'https://art.pixilart.com/b5785ba1c988426.png',
   tnt_side:'https://p.novaskin.me/5096833490.png?class=thumbnail',
   lava:'https://mcdf.wiki.gg/images/d/dd/Lava_Texture_Item.jpg?269d27',
-  obsidian:'https://p.novaskin.me/26p0u0bn7s8.png?class=thumbnail'
+  obsidian:'https://p.novaskin.me/26p0u0bn7s8.png?class=thumbnail',
+
+  // --- Yeni dokular ---
+  ketcap:'https://blogger.googleusercontent.com/img/a/AVvXsEjKpxsvdb1WGvt1BjkjieNEjt5_ppY6JR2t55hRdvp5-Nd3jtDJlcSe5LhMzSS13HbAs6wJMxqP5qHt5VfNNnek_RVGCwAB4OYf6MQw2nAKA0Gbbv95WKN7Ax91H_awHYfgt94kfujdmQJIGXhDPDOBkXMA7VqasHurLJankdTSKtA7HOvZm0_596roJ460=s16000',   // ketçap
+  hardal:'https://blogger.googleusercontent.com/img/a/AVvXsEhquk2uE_C1TNApbbi_tMDqIPhFjlEWIpfgmZPIKDgo1X8QWASzcTIbu8HrzPuclZSV1XS5fBLbFV3VchMlCoc8vSMxGOVBU9BM9Gl9L7xt-jx4v_Vtt-mAmh49C2PcJyquMTjVyDSu28iGOmMmwdSuNxcrVY10qp3QVqbLPlsLr-EAFsA7glci7Mk40aN9=s16000',    // hardal
+  spagetti:'https://blogger.googleusercontent.com/img/a/AVvXsEg3gspUBTFVJhqZX8-dFB0FNusjFi8HVKuBhNZfwlXxY0zGssN0tX2ywK4RuVYrCo9aVOsfkFWN_epG-J6FkpkvssxI4-yzhssO51Js7UE4rGtaxcECVWxI150FYHsyHbwQOZNi33avGKgUsdtH0CogUInGU3L1BcyXvF_Kx2w-8-DbwLB-iVDDryLdTvoO=s16000', // spagetti
+  kurdele:'https://blogger.googleusercontent.com/img/a/AVvXsEi42xzFjCt66sJ77zdcVufPqVjG_Rf-H3bsbx_cCi8NO-lVqhQ_WY1jWI1g-vIjdjkp8wfEX6DcZLFpHDGCa5PE_AsMw753ShwvO3IPlLJvhBwCl1-2d1g9yXVyik2pg2GYhrkV7Qj9WkfH0BzAw_BqnflYbfLZlyWYAWNZ8RtqFpNqoZs3a3OvLUh4JeVW=s16000', // kurdele
+  burgu:'https://blogger.googleusercontent.com/img/a/AVvXsEhm4E3rhjNyklDlrE7xCmq6aN250Ct1MexYcgt7DtzBzqxIBfeLN7GSKG5FrCCiSznt_oOfbc4_2FZuC6RyXk3Im0VTxBt9o4-Ha9Z_OSpbROr7CHUoreCKQ4tcVkBqRL_9GoRfYIw2BXFCQCjw6OzRR2IX5vUvExIy7E68d_CqOAHFpbC10GO4p5VLPUMQ=s16000', // burgu
+  konik:'https://blogger.googleusercontent.com/img/a/AVvXsEhS2T0RmqwFgrKpuG6dDqjZHaRE5VdKSAPTp-75htKg8VwL4dxxLX1sznjZ6L7ZgwKrhTtsp8A7e8IP6mfl4TbEUJIVu2DkDCIvBT2F629gLaMQjIr-86e_nu94oVkkA6Ilxm7CWAgKwISejmYfkDwUaOSnLVDmoERc8bRurOaPY2BxmBsWm7y55Zu1XRRb=s16000', // konik
+  patates:'https://blogger.googleusercontent.com/img/a/AVvXsEhmhgj77M5_1VS9TREG8hMb8NbRNW0jtj8pxoV0Yp5BTXYMwKC-5_c1VAiRXIrRoAEosnrPUZ5XHUqxr4Ii14FvDgRX-H4WfBa2k0UuT4KpbeESdmkRPGIYqk_A4Zd0FpgqgMlF3GndTVji7pcYN2W50WuxfGkibtAFnuGV805xhRua9von_VyUNi8hlWzl=s16000' // patates
+
 };
 
 const BLOCK = {
   AIR:0, DIRT:1, GRAVEL:2, STONE:3, WOOD:4, SAND:5, PLANK:6, WATER:7, GRASS:8,
   PIG:9, VILLAGER:10, GLASS:11, GLOWSTONE:12,
-  TNT:13, LAVA:14, OBSIDIAN:15, PORTAL:16
+  TNT:13, LAVA:14, OBSIDIAN:15, PORTAL:16  , KETCAP:17, HARDAL:18, SPAGETTI:19, KURDELE:20, BURGU:21, KONIK:22, PATATES:23
+
 };
 const NAMES = {
   1:'Dirt',2:'Gravel',3:'Stone',4:'Wood',5:'Sand',6:'Plank',7:'Water',8:'Grass',
-  11:'Glass',12:'Glowstone',13:'TNT',14:'Lava',15:'Obsidian',16:'Portal'
+  11:'Glass',12:'Glowstone',13:'TNT',14:'Lava',15:'Obsidian',16:'Portal' ,17:'Ketçap',18:'Hardal',19:'Spagetti',20:'Kurdele',21:'Burgu',22:'Konik',23:'Patates'
+
 };
+
+// Akışkan blok seti (su benzeri): ketçap + hardal + su
+const FLUIDS = new Set([BLOCK.WATER, BLOCK.KETCAP, BLOCK.HARDAL, BLOCK.LAVA]);
+
 
 // Scene & camera
 const scene = new THREE.Scene(); scene.background = new THREE.Color(0x87ceeb);
-const camera = new THREE.PerspectiveCamera(75,innerWidth/innerHeight,0.01,300);
+const camera = new THREE.PerspectiveCamera(60,innerWidth/innerHeight,0.01,300);
 camera.rotation.order = 'YXZ'; // yaw→pitch, roll kilitli kalsın
 const renderer = new THREE.WebGLRenderer({antialias:true});
 renderer.setSize(innerWidth,innerHeight); renderer.setPixelRatio(Math.min(2,window.devicePixelRatio));
@@ -176,23 +196,28 @@ function buildFlatWorld() {
     }
   }
 
-  // 1 adet göl (yüzey z=z2'de)
-  const lakeZ = z2;
-  if (lakeZ >= 0) {
-    const lake = {
-      x0: Math.floor(GRID_W*0.55),
-      x1: Math.floor(GRID_W*0.85),
-      y0: Math.floor(GRID_H*0.55),
-      y1: Math.floor(GRID_H*0.85)
-    };
-    for (let y=lake.y0; y<lake.y1; y++) {
-      for (let x=lake.x0; x<lake.x1; x++) {
-        grid[lakeZ][y][x] = BLOCK.WATER;         // yüzey
-        activateWater(x,y,lakeZ, 0);             // göl suyu = kaynak (mesafe 0)
-        if (lakeZ-1 >= 0) grid[lakeZ-1][y][x] = BLOCK.DIRT; // taban
-      }
+// 1 adet göl (yüzey z=z2'de)
+const lakeZ = z2;
+if (lakeZ >= 0) {
+  const lake = {
+    x0: Math.floor(GRID_W*0.55),
+    x1: Math.floor(GRID_W*0.85),
+    y0: Math.floor(GRID_H*0.55),
+    y1: Math.floor(GRID_H*0.85)
+  };
+  // Gölü PASİF doldur (AKTİFLEŞTİRME YOK)
+  for (let y=lake.y0; y<lake.y1; y++) {
+    for (let x=lake.x0; x<lake.x1; x++) {
+      grid[lakeZ][y][x] = BLOCK.WATER;                 // su yüzeyi
+      if (lakeZ-1 >= 0) grid[lakeZ-1][y][x] = BLOCK.DIRT; // taban
     }
   }
+  // Sadece ORTADAKİ 1 hücreyi kaynak yap (20 hücreye kadar yayılır)
+  const cx = Math.floor((lake.x0 + lake.x1)/2);
+  const cy = Math.floor((lake.y0 + lake.y1)/2);
+  activateWater(cx, cy, lakeZ, 0, BLOCK.WATER);
+}
+
 
   // 3–5 ağaç
   const treeCount = 4;
@@ -243,44 +268,56 @@ function canFillWater(x,y,z, nowMs){
 
 // Su akışı: önce aşağı (z-1), sonra aynı seviyeye; menzil ve hız sınırlı
 function stepWater(maxNew = WATER_MAX_PER_TICK){
-  const nowMs = performance.now();
-  let made = 0;
+  if (waterActive.size === 0) return;
 
-  // Bu tikte işlenecek aktif su hücreleri
+  const now = performance.now();
   const batch = Array.from(waterActive);
-  waterActive.clear();
+  let placed = 0;
 
-  for (let i = 0; i < batch.length; i++){
-    const k  = batch[i];
+  for (let i = 0; i < batch.length && placed < maxNew; i++){
+    const k = batch[i];
     const [sx,sy,sz] = k.split('|').map(Number);
-    const curDist = waterDist.get(k) ?? 0;
 
-    // 1) Öncelik: AŞAĞI (z-1)
+    // cooldown kontrolü
+    const ck = wkey(sx,sy,sz);
+    const cd = waterCooldown.get(ck) ?? 0;
+    if (cd > now) continue;
+
+    const curDist = waterDist.get(k) ?? 0;
+    const tFluid  = waterType.get(k) ?? BLOCK.WATER; // WATER / LAVA / KETCAP / HARDAL
+
+    // Tür bazlı mesafe limiti (yoksa 20)
+    const LIMIT = (typeof FLUID_MAX_DIST_BY_TYPE !== 'undefined' && FLUID_MAX_DIST_BY_TYPE[tFluid] !== undefined)
+      ? FLUID_MAX_DIST_BY_TYPE[tFluid]
+      : 20;
+
+    // Bu hücre zaten limite ulaştıysa yayma
+    if (curDist >= LIMIT) continue;
+
+    // ↓ AŞAĞI AKIŞ
     const dz = sz - 1;
-    if (curDist + 1 <= WATER_MAX_RANGE && canFillWater(sx,sy,dz, nowMs)){
-      setBlock(sx,sy,dz, BLOCK.WATER);
-      activateWater(sx,sy,dz, curDist + 1);
-      activateWater(sx,sy,sz, curDist); // kaynak hücre ileride tekrar deneyebilir
-      if (++made >= maxNew) break;
-      continue; // bu tikte yana akma yok, önce düşme
+    if (curDist + 1 <= LIMIT && dz >= 0 && dz < GRID_D && grid[dz][sy][sx] === BLOCK.AIR){
+      setBlock(sx,sy,dz, tFluid, {suppressFluid:true});           // ← motor kaynak oluşturmasın
+      activateWater(sx,sy,dz, curDist + 1, tFluid);
+      activateWater(sx,sy,sz, curDist, tFluid); // kaynağı aktif tut
+      placed++;
+      continue;
     }
 
-    // 2) Aynı seviyede yanlara (sağ, sol, ileri, geri)
+    // → YANA AKIŞ (4 yön)
     const dirs = [[1,0],[-1,0],[0,1],[0,-1]];
     for (const [dx,dy] of dirs){
+      if (placed >= maxNew) break;
       const nx = sx + dx, ny = sy + dy, nz = sz;
-      if (curDist + 1 > WATER_MAX_RANGE) break;   // menzil sınırı
-      if (canFillWater(nx,ny,nz, nowMs)){
-        setBlock(nx,ny,nz, BLOCK.WATER);
-        activateWater(nx,ny,nz, curDist + 1);
-        if (++made >= maxNew) break;
+      if (!inRange(nx,ny,nz)) continue;
+
+      if (curDist + 1 > LIMIT) continue; // sınırı aşma
+      if (grid[nz][ny][nx] === BLOCK.AIR){
+        setBlock(nx,ny,nz, tFluid, {suppressFluid:true});         // ← motor kaynak oluşturmasın
+        activateWater(nx,ny,nz, curDist + 1, tFluid);
+        placed++;
       }
     }
-
-    // Kaynak hücreyi aktif tut (ileride yeni boşluklar için)
-    activateWater(sx,sy,sz, curDist);
-
-    if (made >= maxNew) break;
   }
 }
 
@@ -290,11 +327,78 @@ buildFlatWorld();
 
 // Materials
 const loader = new THREE.TextureLoader();
-function basicMat(url,opt={transparent:false,opacity:1, emissive:0x000000}){
-  const t=loader.load(url);
-  t.magFilter=THREE.NearestFilter; t.minFilter=THREE.LinearMipMapLinearFilter;
-  return new THREE.MeshStandardMaterial({map:t,transparent:opt.transparent,opacity:opt.opacity,emissive:new THREE.Color(opt.emissive)});
+loader.setCrossOrigin('anonymous');
+
+function basicMat(url, opt = { transparent:false, opacity:1, emissive:0x000000 }) {
+  const t = loader.load(
+    url,
+    undefined,
+    undefined,
+    () => {
+      console.warn('Doku yüklenemedi (CORS?):', url);
+    }
+  );
+  t.magFilter = THREE.NearestFilter;
+  t.minFilter = THREE.LinearMipMapLinearFilter;
+  return new THREE.MeshStandardMaterial({
+    map: t,
+    transparent: opt.transparent,
+    opacity: opt.opacity,
+    emissive: new THREE.Color(opt.emissive)
+  });
 }
+
+// CORS başlığı vermeyen kaynakları proxy'le
+function corsify(rawUrl){
+  try {
+    const u = new URL(rawUrl);
+    // proxy'lemek istediğimiz hostları buraya ekleyebiliriz
+    const needsProxy = [
+      'blogger.googleusercontent.com',
+      'encrypted-tbn0.gstatic.com',
+      'p.novaskin.me',
+      'mcdf.wiki.gg',
+      'media.tenor.com',
+      'r2.mcpedl.com',
+      'art.pixilart.com'
+    ].includes(u.host);
+    if (!needsProxy) return rawUrl;
+
+    // images.weserv.nl şemayı istemez; ssl: ile https zorlarız
+    const withoutScheme = rawUrl.replace(/^https?:\/\//, '');
+    return 'https://images.weserv.nl/?url=ssl:' + withoutScheme + '&output=png';
+  } catch (e){
+    // Geçersiz URL geldiyse olduğu gibi döndür
+    return rawUrl;
+  }
+}
+
+function basicMat(url, opt = { transparent:false, opacity:1, emissive:0x000000 }) {
+  const proxied = corsify(url);
+  const t = loader.load(
+    proxied,
+    undefined,
+    undefined,
+    () => console.warn('Doku yüklenemedi (CORS?):', proxied)
+  );
+  t.magFilter = THREE.NearestFilter;
+  t.minFilter = THREE.LinearMipMapLinearFilter;
+  return new THREE.MeshStandardMaterial({
+    map: t,
+    transparent: opt.transparent,
+    opacity: opt.opacity,
+    emissive: new THREE.Color(opt.emissive)
+  });
+}
+
+
+function colorMat(color, {opacity=1, transparent=false, emissive=0x000000}={}){
+  return new THREE.MeshStandardMaterial({
+    color, opacity, transparent,
+    emissive: new THREE.Color(emissive)
+  });
+}
+
 const mats={};
 mats[BLOCK.DIRT]=basicMat(TEX.dirt);
 mats[BLOCK.GRAVEL]=basicMat(TEX.gravel);
@@ -305,8 +409,17 @@ mats[BLOCK.PLANK]=basicMat(TEX.plank);
 mats[BLOCK.WATER]=basicMat(TEX.water);
 mats[BLOCK.GLASS]=basicMat(TEX.glass);
 mats[BLOCK.GLOWSTONE]=basicMat(TEX.glowstone,{emissive:0x775533});
-mats[BLOCK.LAVA]=basicMat(TEX.lava,{emissive:0x993300});
+mats[BLOCK.LAVA] = basicMat(TEX.lava, { emissive: 0x552200 });
 mats[BLOCK.OBSIDIAN]=basicMat(TEX.obsidian,{emissive:0x111122});
+mats[BLOCK.KETCAP]   = basicMat(TEX.ketcap);
+mats[BLOCK.HARDAL]   = basicMat(TEX.hardal);
+mats[BLOCK.SPAGETTI] = basicMat(TEX.spagetti);
+mats[BLOCK.KURDELE]  = basicMat(TEX.kurdele);
+mats[BLOCK.BURGU]    = basicMat(TEX.burgu);
+mats[BLOCK.KONIK]    = basicMat(TEX.konik);
+mats[BLOCK.PATATES]  = basicMat(TEX.patates);
+
+
 
 // TNT: 6 yüz (right,left,top,bottom,front,back)
 function tntMaterialsArray(){
@@ -352,18 +465,54 @@ function removeGlowLight(x,y,z){
 
 // Mesh map
 const meshesMap=new Map();
-function createMeshForBlock(x,y,z,t){
-  let mesh;
-  if(t===BLOCK.GRASS) mesh=new THREE.Mesh(cubeGeo,grassMaterialsArray());
-  else if(t===BLOCK.WATER){ const m=mats[BLOCK.WATER].clone(); m.opacity=0.6; mesh=new THREE.Mesh(cubeGeo,m); }
-  else if(t===BLOCK.TNT){ mesh=new THREE.Mesh(cubeGeo,tntMaterialsArray()); }
-  else if(t===BLOCK.PORTAL){ mesh=new THREE.Mesh(cubeGeo,portalMat); }
-  else if(t===BLOCK.LAVA){ const m=mats[BLOCK.LAVA].clone(); m.opacity=0.92; mesh=new THREE.Mesh(cubeGeo,m); }
-  else mesh=new THREE.Mesh(cubeGeo,mats[t]||mats[BLOCK.DIRT]);
-  mesh.position.copy(posFor(x,y,z));
-  mesh.userData={x,y,z,t};
+
+function createMeshForBlock(x, y, z, t){
+  // Akışkanlar: su / ketçap / hardal / lava
+  if (FLUIDS.has(t)) {
+    const m = mats[t].clone();
+
+    if (t === BLOCK.WATER) {
+      // Su: yarı saydam
+      m.opacity = 0.60;
+      m.transparent = true;
+    } else if (t === BLOCK.KETCAP) {
+      // Ketçap: hafif şeffaf
+      m.opacity = 0.85;
+      m.transparent = true;
+    } else if (t === BLOCK.HARDAL) {
+      // Hardal: ketçaptan bir tık daha şeffaf
+      m.opacity = 0.80;
+      m.transparent = true;
+    } else {
+      // Lava: opak (doku tam görünsün)
+      m.opacity = 1.0;
+      m.transparent = false;
+    }
+
+    const mesh = new THREE.Mesh(cubeGeo, m);
+    mesh.position.copy(posFor(x, y, z));
+    mesh.userData = { x, y, z, t };
+    return mesh;
+  }
+
+  // Diğer bloklar
+  let matOrArray;
+  if (t === BLOCK.GRASS) {
+    matOrArray = grassMaterialsArray();
+  } else if (t === BLOCK.TNT) {
+    matOrArray = tntMaterialsArray();
+  } else if (t === BLOCK.PORTAL) {
+    matOrArray = portalMat;
+  } else {
+    matOrArray = mats[t] || mats[BLOCK.DIRT];
+  }
+
+  const mesh = new THREE.Mesh(cubeGeo, matOrArray);
+  mesh.position.copy(posFor(x, y, z));
+  mesh.userData = { x, y, z, t };
   return mesh;
 }
+
 function addBlockMesh(x,y,z,t){
   const mesh=createMeshForBlock(x,y,z,t);
   blocksGroup.add(mesh); meshesMap.set(keyOf(x,y,z),mesh);
@@ -377,10 +526,13 @@ function removeBlockMesh(x,y,z){
   }
 }
 
-function setBlock(x,y,z,t){
+function setBlock(x,y,z,t, opts = {}){
   if(z<0||z>=GRID_D||y<0||y>=GRID_H||x<0||x>=GRID_W) return;
   const prev = grid[z][y][x];
   if(prev === t) return;
+
+  const suppressFluid = !!opts.suppressFluid; // ← motorun yerleştirdiklerinde true gönder
+
 
   // Mevcut mesh'i temizle
   if(prev !== BLOCK.AIR) removeBlockMesh(x,y,z);
@@ -391,26 +543,36 @@ function setBlock(x,y,z,t){
   // Yeni mesh'i ekle
   if(t !== BLOCK.AIR) addBlockMesh(x,y,z,t);
 
-// --- SU AKIŞ TETİKLEYİCİSİ ---
-if (t === BLOCK.WATER){
-  // Yeni su kondu → kaynaktır (mesafe 0)
-  activateWater(x,y,z, 0);
+
+// --- AKIŞKAN AKIŞ TETİKLEYİCİSİ ---
+if (FLUIDS.has(t) && !suppressFluid){
+  // Oyuncu koydu → bu hücre KAYNAK (mesafe 0)
+  activateWater(x,y,z, 0, t);
 } else if (t === BLOCK.AIR){
-  // Bir blok kırıldı → komşu sulardan akış tetiklenir
-  const nn = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
+  // Oyuncu kırdı → SADECE 1 komşu sıvıyı KAYNAK yap (öncelik: yukarı → yanlar → aşağı)
+  const nn = [
+    [0,0,1],   // üst
+    [1,0,0],[-1,0,0],[0,1,0],[0,-1,0], // yanlar
+    [0,0,-1]   // alt
+  ];
   for (const [dx,dy,dz] of nn){
     const nx=x+dx, ny=y+dy, nz=z+dz;
-    if (inRange(nx,ny,nz) && grid[nz][ny][nx] === BLOCK.WATER){
-      const dk = wkey(nx,ny,nz);
-      const d  = waterDist.get(dk) ?? 0;
-      activateWater(nx,ny,nz, d);  // komşu su, kendi mesafesiyle aktif
+    if (!inRange(nx,ny,nz)) continue;
+    const nb = grid[nz][ny][nx];
+    if (FLUIDS.has(nb)){
+      activateWater(nx,ny,nz, 0, nb); // sadece İLK bulduğunu kaynak yap
+      break;
     }
   }
 }
-// Eğer ÖNCEKİ durum WATER ise ve şimdi AIR olduysa → cooldown
-if (prev === BLOCK.WATER && t === BLOCK.AIR){
+
+
+
+// Önceki blok akışkansa ve şimdi AIR ise → cooldown
+if (FLUIDS.has(prev) && t === BLOCK.AIR){
   waterCooldown.set(wkey(x,y,z), performance.now() + WATER_COOLDOWN_MS);
 }
+
 
 
   // -------------------------------------------
@@ -438,21 +600,24 @@ function topSolidZ(ix,iy){
   return -1;
 }
 
-// Üstünde en az 2 boş kat olan EN DÜŞÜK sağlam zemin (alttan yukarı ara)
-function walkableTopZ(ix, iy){
-  if (ix<0 || iy<0 || ix>=GRID_W || iy>=GRID_H) return -1;
+// Bir (ix, iy) sütununda YÜRÜNEBİLİR tepe yüksekliği (blok üst yüzeyi)
+// Not: Sıvılar ve PORTAL üstü "zemin" sayılmaz; katı blok üstü sayılır.
+// DÖNEN DEĞER: hücre Z indeksi (tam sayı) — oyuncu.z = returned + EYE_HEIGHT
 
-  for (let z = 0; z < GRID_D; z++) {
-    if (isSolidAt(ix, iy, z) && !isSolidAt(ix, iy, z+1) && !isSolidAt(ix, iy, z+2)) {
-      return z;                     // ilk bulduğunu döndür → gerçek “yer”
+function walkableTopZ(ix, iy){
+  if (ix < 0 || iy < 0 || ix >= GRID_W || iy >= GRID_H) return 0;
+
+  // En üstten aşağı tara: ilk katı bloğun TEPE yüzeyi = z+1
+  for (let z = GRID_D - 1; z >= 0; z--){
+    const b = grid[z]?.[iy]?.[ix] ?? BLOCK.AIR;
+    if (b !== BLOCK.AIR && b !== BLOCK.PORTAL && !FLUIDS.has(b)){
+      return z + 1;
     }
   }
-
-
-// hiç uygun yüzey yoksa emniyet: normal topSolidZ ya da zemin
-const t = topSolidZ(ix, iy);
-return (t >= 0 ? Math.max(0, Math.min(t, GRID_D-3)) : -1);
+  // Kolon tamamen boşsa zemin 0 kabul
+  return 0;
 }
+
 
 // Sürekli konum → hücre endeksi (merkezlere göre, simetrik)
 const cellIdx = v => Math.floor(v + 0.5);
@@ -462,7 +627,7 @@ function isSolidAt(ix, iy, iz){
   if (iz < 0 || iz >= GRID_D || iy < 0 || iy >= GRID_H || ix < 0 || ix >= GRID_W) return false;
   const b = grid[iz][iy][ix];
   // Üzerinde yürünemeyen, “katı” bloklar
-  return b !== BLOCK.AIR && b !== BLOCK.WATER && b !== BLOCK.LAVA && b !== BLOCK.PORTAL;
+  return !(b === BLOCK.AIR || FLUIDS.has(b) || b === BLOCK.LAVA || b === BLOCK.PORTAL);
 }
 
 
@@ -473,7 +638,7 @@ function cellOverlapsCircle(cx, cy, ix, iy, r){
   const closestY = Math.max(iy, Math.min(cy, iy + 1));
   const dx = cx - closestX, dy = cy - closestY;
   // Eşik: sadece d^2 < r^2 ise çarpışma; eşitlik (dokunma) çarpışma sayılmaz
-  return (dx*dx + dy*dy) < (r*r - 1e-6);
+  return (dx*dx + dy*dy) < (r*r - 1e-4);
 }
 
 
@@ -498,12 +663,12 @@ function canStandAt(x, y, baseZ){
 
 // Hedef hücrede (ix,iy) taban baseZ iken, oyuncunun kapladığı
 // iki kat (baseZ+1 ve baseZ+2) içinde SU var mı?
-function isWaterColumn(ix, iy, baseZ){
+function isFluidColumn(ix, iy, baseZ){
   if (ix<0 || iy<0 || ix>=GRID_W || iy>=GRID_H) return false;
   const z1 = baseZ + 1, z2 = baseZ + 2;
-  const w1 = (z1>=0 && z1<GRID_D) ? (grid[z1][iy][ix] === BLOCK.WATER) : false;
-  const w2 = (z2>=0 && z2<GRID_D) ? (grid[z2][iy][ix] === BLOCK.WATER) : false;
-  return w1 || w2;
+  const b1 = (z1>=0 && z1<GRID_D) ? grid[z1][iy][ix] : BLOCK.AIR;
+  const b2 = (z2>=0 && z2<GRID_D) ? grid[z2][iy][ix] : BLOCK.AIR;
+  return FLUIDS.has(b1) || FLUIDS.has(b2);
 }
 
 
@@ -515,12 +680,12 @@ const SKIN = 0.01;
 
 function resolveWallCollisions(){
   const r    = PLAYER_RADIUS;
-  const SKIN = 0.002;   // daha küçük pay
+  const SKIN = 0.0005;  // daha da küçük pay → kenarda itme azalır
   const EPS  = 1e-6;
 
   const baseZ = Math.max(0, Math.floor(player.z - EYE_HEIGHT));
 
-  for (let pass = 0; pass < 3; pass++){
+  for (let pass = 0; pass < 2; pass++){
     let moved = false;
 
     const px = player.x, py = player.y;
@@ -654,24 +819,44 @@ const player = {
   player.z = (zTop < 0 ? 0 : zTop) + EYE_HEIGHT;
 })();
 
-// Pointer lock + mouse
-renderer.domElement.addEventListener('click', ()=>{
-  renderer.domElement.requestPointerLock();
-});
-document.addEventListener('pointerlockchange', ()=>{
-  if (document.pointerLockElement === renderer.domElement){
+// Pointer lock + mouse (sağlam sürüm)
+renderer.domElement.setAttribute('tabindex','0'); // odaklanabilir olsun
+
+function enablePointerLock() {
+  const el = renderer.domElement;
+  // Sayfa odağını garanti et
+  if (document.activeElement !== el) el.focus();
+  if (document.pointerLockElement !== el) {
+    el.requestPointerLock();
+  }
+}
+
+// click yerine mousedown daha tutarlı
+renderer.domElement.addEventListener('mousedown', enablePointerLock);
+
+// Pointer lock değişimlerini takip et
+function onPointerLockChange(){
+  const el = renderer.domElement;
+  const locked = (document.pointerLockElement === el);
+  if (locked){
     document.addEventListener('mousemove', onMouseMove);
   } else {
     document.removeEventListener('mousemove', onMouseMove);
   }
+}
+document.addEventListener('pointerlockchange', onPointerLockChange);
+document.addEventListener('pointerlockerror', ()=> {
+  console.warn('Pointer lock alınamadı (tarayıcı engeli veya element çakışması).');
 });
+
+// Fare hareketi → kamera
 function onMouseMove(e){
   player.yaw   -= e.movementX * 0.0025;
   player.pitch -= e.movementY * 0.0025;
   player.pitch = Math.max(-Math.PI/2, Math.min(Math.PI/2, player.pitch));
-  // 'YXZ' sırasına uygun atama: y= yaw, x= pitch, z=0 (roll yok)
   camera.rotation.set(player.pitch, player.yaw, 0);
 }
+
 
 // Keys
 const keys = {};
@@ -747,7 +932,8 @@ window.addEventListener('contextmenu', (e)=>{
 // Toolbar
 const toolbar = [
   BLOCK.DIRT,BLOCK.GRASS,BLOCK.SAND,BLOCK.WOOD,BLOCK.PLANK,BLOCK.STONE,
-  BLOCK.WATER,BLOCK.GRAVEL,BLOCK.GLASS,BLOCK.GLOWSTONE,BLOCK.TNT,BLOCK.LAVA,BLOCK.OBSIDIAN
+  BLOCK.WATER,BLOCK.GRAVEL,BLOCK.GLASS,BLOCK.GLOWSTONE,BLOCK.TNT,BLOCK.LAVA,BLOCK.OBSIDIAN , BLOCK.KETCAP, BLOCK.HARDAL, BLOCK.SPAGETTI, BLOCK.KURDELE, BLOCK.BURGU, BLOCK.KONIK, BLOCK.PATATES
+
 ];
 let selectedIndex = 0, selectedBlock = toolbar[selectedIndex];
 const toolbarEl = document.getElementById('toolbar'), blockNameEl = document.getElementById('blockName');
@@ -766,6 +952,13 @@ function iconFor(b){
     case BLOCK.TNT:       return TEX.tnt_side;
     case BLOCK.LAVA:      return TEX.lava;
     case BLOCK.OBSIDIAN:  return TEX.obsidian;
+    case BLOCK.KETCAP:    return TEX.ketcap;
+    case BLOCK.HARDAL:    return TEX.hardal;
+    case BLOCK.SPAGETTI:  return TEX.spagetti;
+    case BLOCK.KURDELE:   return TEX.kurdele;
+    case BLOCK.BURGU:     return TEX.burgu;
+    case BLOCK.KONIK:     return TEX.konik;
+    case BLOCK.PATATES:   return TEX.patates;
     default:              return TEX.dirt;
   }
 }
@@ -815,62 +1008,48 @@ function buildInventory(){
 
 
 // LAV yayılması + etkileşimler
+// Not: Lava'nın YAYILMASINI stepWater yönetiyor (20 blok sınırı ile).
+// Bu fonksiyon artık YENİ lava hücresi üretmez; sadece istersek yan etkiler eklenebilir.
 function stepLava(){
-  const toAdd=[]; const maxAdds=8;
-  outer: for(let z=0; z<GRID_D; z++) for(let y=0;y<GRID_H;y++) for(let x=0;x<GRID_W;x++){
-    if(grid[z][y][x]!==BLOCK.LAVA) continue;
-
-    // Su komşuluğu → Obsidiyen
-    const neighAll=[[0,0,-1],[0,0,1],[0,1,0],[0,-1,0],[1,0,0],[-1,0,0]];
-    for(const d of neighAll){
-      const nx=x+d[0], ny=y+d[1], nz=z+d[2];
-      const b = grid[nz]?.[ny]?.[nx];
-      if(b===BLOCK.WATER){ setBlock(x,y,z,BLOCK.OBSIDIAN); continue outer; }
-    }
-
-    // Aşağı akış öncelikli
-    if(z-1>=0 && grid[z-1][y][x]===BLOCK.AIR){ toAdd.push([z-1,y,x]); if(toAdd.length>=maxAdds) break outer; continue; }
-
-    // Yana akış
-    const neigh=[[0,1,0],[0,-1,0],[1,0,0],[-1,0,0]];
-    for(const d of neigh){
-      const nx=x+d[0], ny=y+d[1], nz=z+d[2];
-      if(nx>=0&&ny>=0&&nx<GRID_W&&ny<GRID_H&&grid[nz]?.[ny]?.[nx]===BLOCK.AIR){ toAdd.push([nz,ny,nx]); if(toAdd.length>=maxAdds) break outer; }
-    }
-
-    // Ahşap yakma
-    for(const d of neighAll){
-      const nx=x+d[0], ny=y+d[1], nz=z+d[2];
-      const b = grid[nz]?.[ny]?.[nx];
-      if(b===BLOCK.WOOD || b===BLOCK.PLANK){
-        if(Math.random()<0.25){ setBlock(nx,ny,nz,BLOCK.LAVA); } // tutuşup lava'ya döner
-      }
-    }
-  }
-  // Yayılma
-  for(const [z,y,x] of toAdd){ if(grid[z][y][x]===BLOCK.AIR){ setBlock(x,y,z,BLOCK.LAVA); } }
+  // İleride efekt yazmak istersen:
+  // - Ahşabı yak: sadece görsel/puan vs. (setBlock(BLOCK.LAVA) YAPMA!)
+  // - Partikül, ses, ışık animasyonu vb.
+  // Şimdilik bilerek boş.
 }
 
 // Kum/çakıl düşmesi
 function stepFall(){
-  for(let z=GRID_D-2; z>=0; z--) for(let y=0;y<GRID_H;y++) for(let x=0;x<GRID_W;x++){
-    if(grid[z][y][x]===BLOCK.SAND || grid[z][y][x]===BLOCK.GRAVEL){
-      if(grid[z-1]?.[y]?.[x]===BLOCK.AIR){ setBlock(x,y,z-1,grid[z][y][x]); setBlock(x,y,z,BLOCK.AIR); }
+  for (let z = GRID_D - 2; z >= 0; z--) {
+    for (let y = 0; y < GRID_H; y++) {
+      for (let x = 0; x < GRID_W; x++) {
+        if (grid[z][y][x] === BLOCK.SAND || grid[z][y][x] === BLOCK.GRAVEL) {
+          if (grid[z - 1]?.[y]?.[x] === BLOCK.AIR) {
+            setBlock(x, y, z - 1, grid[z][y][x]);
+            setBlock(x, y, z, BLOCK.AIR);
+          }
+        }
+      }
     }
   }
 }
 
 // Underwater overlay
-const overlay=document.getElementById('overlay-underwater');
+const overlay = document.getElementById('overlay-underwater');
 function updateUnderwater(){
-  const ix=Math.floor((camera.position.x/BLOCK_SIZE)+GRID_W/2);
-  const iy=Math.floor((camera.position.z/BLOCK_SIZE)+GRID_H/2);
-  const iz=Math.floor((camera.position.y/BLOCK_SIZE));
-  const b=(grid[iz]?.[iy]?.[ix])|0;
-  if(b===BLOCK.WATER) overlay.style.background='rgba(0,30,70,0.25)';
-  else if(b===BLOCK.LAVA) overlay.style.background='rgba(160,50,0,0.25)';
-  else overlay.style.background='rgba(0,0,0,0)';
+  const ix = Math.floor((camera.position.x / BLOCK_SIZE) + GRID_W / 2);
+  const iy = Math.floor((camera.position.z / BLOCK_SIZE) + GRID_H / 2);
+  const iz = Math.floor((camera.position.y / BLOCK_SIZE));
+  const b  = (grid[iz]?.[iy]?.[ix]) | 0;
+
+  if (b === BLOCK.LAVA) {
+    overlay.style.background = 'rgba(160,50,0,0.25)';   // lava parıltısı
+  } else if (FLUIDS.has(b)) {
+    overlay.style.background = (b === BLOCK.HARDAL ? 'rgba(130,90,0,0.25)' : 'rgba(0,30,70,0.25)');
+  } else {
+    overlay.style.background = 'rgba(0,0,0,0)';
+  }
 }
+
 
 // Basit mob sistemi (sprite)
 const mobsGroup = new THREE.Group(); scene.add(mobsGroup);
@@ -1171,7 +1350,7 @@ function tryMoveTo(nx, ny){
 
   // Yan çarpışma + su istisnası
   if (!canStandAt(nx, ny, baseZForCheck)) {
-    if (isWaterColumn(tx, ty, tarTop)) {
+    if (isFluidColumn(tx, ty, tarTop)) {
       player.x = nx; player.y = ny; player.z = tarTop + EYE_HEIGHT;
       return true;
     }
@@ -1244,13 +1423,12 @@ function animate(){
   // Zıplama tuşu
   const jumpPressed = keys['space'] || keys[' '];
 
-  // Suda hız azaltma
-const standingInWater = isWaterColumn(
+// Suda hız azaltma
+const standingInWater = isFluidColumn(
   cellIdx(player.x),
   cellIdx(player.y),
   Math.floor(player.z - EYE_HEIGHT)
 );
-
 
   const speedMul = standingInWater ? 0.6 : 1.0;
 
